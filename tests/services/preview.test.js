@@ -37,6 +37,37 @@ describe("preview.diff", () => {
     const d = diff({ a: null }, { a: "x" });
     expect(d).toEqual([{ path: "a", before: null, after: "x" }]);
   });
+
+  it("skips Strapi system keys at the root", () => {
+    const existing = {
+      id: 42,
+      documentId: "doc1",
+      locale: "en",
+      createdAt: "2024-01-01",
+      updatedAt: "2024-01-02",
+      publishedAt: "2024-01-03",
+      createdBy: { id: 1 },
+      updatedBy: { id: 1 },
+      localizations: [{ id: 7, locale: "de" }],
+      title: "Hallo",
+    };
+    const proposed = { title: "Hello" };
+    expect(diff(existing, proposed)).toEqual([
+      { path: "title", before: "Hallo", after: "Hello" },
+    ]);
+  });
+
+  it("skips system keys nested inside components", () => {
+    const existing = {
+      hero: { id: 5, heading: "Hallo", __component: "blocks.hero" },
+    };
+    const proposed = {
+      hero: { heading: "Hello", __component: "blocks.hero" },
+    };
+    expect(diff(existing, proposed)).toEqual([
+      { path: "hero.heading", before: "Hallo", after: "Hello" },
+    ]);
+  });
 });
 
 describe("preview service lifecycle", () => {

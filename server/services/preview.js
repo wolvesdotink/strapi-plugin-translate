@@ -16,11 +16,30 @@ const crypto = require("node:crypto");
 const STORE_KEY = { type: "plugin", name: "translate", key: "previews" };
 const TTL_MS = 60 * 60 * 1000; // 1 hour
 
+// Strapi-managed keys that exist on the populated source entry but never on
+// the proposed payload. Including them in the diff floods the UI with noise
+// like `id: 42 → undefined` or `locale: "en" → undefined` — none of which
+// represents a translation decision the editor needs to review.
+const SYSTEM_KEYS = new Set([
+  "id",
+  "documentId",
+  "locale",
+  "createdAt",
+  "updatedAt",
+  "publishedAt",
+  "createdBy",
+  "updatedBy",
+  "localizations",
+]);
+
 /**
  * Recursive diff: returns an array of { path, before, after } for every
  * leaf that differs. Arrays are diffed by index; objects by key union.
  * Whitespace-only differences are still reported (it's a translation —
  * leading/trailing whitespace can be meaningful).
+ *
+ * System keys (id, locale, timestamps, …) are skipped at every depth so
+ * component/dynamic-zone children don't drag their own ids into the diff.
  */
 const diff = (before, after, pathPrefix = []) => {
   const out = [];
@@ -37,7 +56,10 @@ const diff = (before, after, pathPrefix = []) => {
     }
     if (typeof a === "object" && typeof b === "object") {
       const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-      for (const k of keys) walk(a[k], b[k], path.concat(k));
+      for (const k of keys) {
+        if (SYSTEM_KEYS.has(k)) continue;
+        walk(a[k], b[k], path.concat(k));
+      }
       return;
     }
     // Primitive scalar mismatch

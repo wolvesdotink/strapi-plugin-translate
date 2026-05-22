@@ -121,11 +121,42 @@ const formatTokens = (n) => {
 };
 
 // Truncate a long string for diff display. Diff values for richtext/blocks
-// can be huge; show the first ~200 chars with an ellipsis.
-const truncate = (v, n = 240) => {
-  if (typeof v !== "string") return JSON.stringify(v);
+// can be huge; show the first ~400 chars with an ellipsis.
+const truncate = (v, n = 400) => {
+  if (v === undefined || v === null) return "";
+  if (typeof v !== "string") {
+    try {
+      const s = JSON.stringify(v);
+      return s.length > n ? `${s.slice(0, n)}…` : s;
+    } catch {
+      return String(v);
+    }
+  }
   if (v.length <= n) return v;
   return `${v.slice(0, n)}…`;
+};
+
+// Turn a dot-joined diff path ("hero.sections.0.title") into a breadcrumb
+// the editor can actually parse: "Hero › Sections › [1] › Title". Numeric
+// segments are shown 1-indexed in brackets so they read as list positions.
+const humanizeSegment = (seg) => {
+  if (/^\d+$/.test(seg)) return `[${Number(seg) + 1}]`;
+  // camelCase → "Camel Case"
+  const spaced = seg.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+};
+const humanizePath = (path) => {
+  if (!path) return "";
+  return path.split(".").map(humanizeSegment).join(" › ");
+};
+
+// Empty/missing values in the diff get a soft placeholder instead of an
+// empty box, so the editor can tell "no value" from "value is whitespace".
+const renderDiffValue = (v) => {
+  if (v === undefined || v === null) return { text: "—", muted: true };
+  if (typeof v === "string" && v.length === 0)
+    return { text: "(empty)", muted: true };
+  return { text: truncate(v), muted: false };
 };
 
 const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
@@ -1186,105 +1217,309 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
 
         {phase === "preview" && preview && (
           <Flex direction="column" alignItems="stretch" gap={4} padding={2}>
-            <Alert
-              variant="default"
-              title={formatMessage(
-                {
-                  id: `${pluginId}.preview.title`,
-                  defaultMessage: "Preview translation to {locale}",
-                },
-                { locale: localeName(targets[0]) }
-              )}
-              closeLabel=""
-            >
-              {formatMessage(
-                {
-                  id: `${pluginId}.preview.intro`,
-                  defaultMessage:
-                    "Review the {count, plural, one {# proposed change} other {# proposed changes}} below. Nothing is saved until you click Apply.",
-                },
-                { count: preview.diff?.length || 0 }
-              )}
-            </Alert>
+            <Flex gap={3} alignItems="flex-start">
+              <Box
+                background="primary100"
+                padding={2}
+                hasRadius
+                shrink={0}
+                color="primary600"
+              >
+                <Earth />
+              </Box>
+              <Box grow={1}>
+                <Flex gap={2} alignItems="center" wrap="wrap">
+                  <Typography variant="omega" fontWeight="semiBold" tag="p">
+                    {formatMessage({
+                      id: `${pluginId}.preview.heading`,
+                      defaultMessage: "Translation preview",
+                    })}
+                  </Typography>
+                  <Badge
+                    backgroundColor="primary100"
+                    textColor="primary700"
+                    size="S"
+                  >
+                    {localeName(targets[0])}
+                  </Badge>
+                </Flex>
+                <Box paddingTop={1}>
+                  <Typography variant="pi" textColor="neutral600">
+                    {formatMessage(
+                      {
+                        id: `${pluginId}.preview.intro`,
+                        defaultMessage:
+                          "{count, plural, =0 {No changes detected.} one {# proposed change.} other {# proposed changes.}} Nothing is saved until you Apply.",
+                      },
+                      { count: preview.diff?.length || 0 }
+                    )}
+                  </Typography>
+                </Box>
+              </Box>
+            </Flex>
 
             {preview.warnings && preview.warnings.length > 0 && (
-              <Alert
-                variant="warning"
-                title={formatMessage(
-                  {
-                    id: `${pluginId}.preview.warningsTitle`,
-                    defaultMessage:
-                      "{count, plural, one {# stale reference skipped} other {# stale references skipped}}",
-                  },
-                  { count: preview.warnings.length }
-                )}
-                closeLabel=""
+              <Box
+                padding={3}
+                background="warning100"
+                hasRadius
+                borderColor="warning200"
+                borderWidth="1px"
+                borderStyle="solid"
               >
-                {preview.warnings.map((w, i) => (
-                  <Box key={i} paddingTop={1}>
-                    <Typography variant="pi" textColor="warning700">
-                      {w.label} — {w.target}#{w.id}
-                    </Typography>
+                <Flex gap={2} alignItems="flex-start">
+                  <Box color="warning700" paddingTop={1} aria-hidden>
+                    <WarningCircle width="1rem" height="1rem" />
                   </Box>
-                ))}
-              </Alert>
+                  <Flex direction="column" gap={1} grow={1}>
+                    <Typography
+                      variant="pi"
+                      fontWeight="bold"
+                      textColor="warning700"
+                    >
+                      {formatMessage(
+                        {
+                          id: `${pluginId}.preview.warningsTitle`,
+                          defaultMessage:
+                            "{count, plural, one {# reference skipped} other {# references skipped}}",
+                        },
+                        { count: preview.warnings.length }
+                      )}
+                    </Typography>
+                    <Typography variant="pi" textColor="warning700">
+                      {formatMessage({
+                        id: `${pluginId}.preview.warningsBody`,
+                        defaultMessage:
+                          "These fields point at records that no longer exist and were left empty:",
+                      })}
+                    </Typography>
+                    <Flex direction="column" gap={1} paddingTop={1}>
+                      {preview.warnings.map((w, i) => (
+                        <Typography
+                          key={i}
+                          variant="pi"
+                          textColor="warning700"
+                        >
+                          · {w.label || formatMessage({
+                            id: `${pluginId}.preview.warningUnnamed`,
+                            defaultMessage: "Unnamed field",
+                          })}
+                        </Typography>
+                      ))}
+                    </Flex>
+                  </Flex>
+                </Flex>
+              </Box>
             )}
 
-            <Box
-              padding={3}
-              background="neutral100"
-              hasRadius
-              borderColor="neutral200"
-              borderWidth="1px"
-              borderStyle="solid"
-              style={{ maxHeight: 360, overflowY: "auto" }}
-            >
-              {(preview.diff || []).length === 0 && (
-                <Typography variant="pi" textColor="neutral600">
-                  {formatMessage({
-                    id: `${pluginId}.preview.noDiff`,
-                    defaultMessage: "No textual differences detected.",
-                  })}
-                </Typography>
-              )}
-              {(preview.diff || []).slice(0, 100).map((d, i) => (
-                <Box key={i} paddingBottom={2}>
-                  <Typography variant="pi" fontWeight="bold" textColor="neutral700">
-                    {d.path}
+            {(preview.diff || []).length === 0 ? (
+              <Box
+                padding={5}
+                background="neutral100"
+                hasRadius
+                borderColor="neutral200"
+                borderWidth="1px"
+                borderStyle="solid"
+              >
+                <Flex direction="column" alignItems="center" gap={1}>
+                  <Typography
+                    variant="omega"
+                    fontWeight="semiBold"
+                    textColor="neutral700"
+                  >
+                    {formatMessage({
+                      id: `${pluginId}.preview.noDiff`,
+                      defaultMessage: "No changes to apply",
+                    })}
                   </Typography>
-                  <Box paddingTop={1}>
-                    <Typography
-                      variant="pi"
-                      textColor="danger700"
-                      tag="div"
-                      style={{ whiteSpace: "pre-wrap" }}
-                    >
-                      − {truncate(d.before)}
-                    </Typography>
-                    <Typography
-                      variant="pi"
-                      textColor="success700"
-                      tag="div"
-                      style={{ whiteSpace: "pre-wrap" }}
-                    >
-                      + {truncate(d.after)}
-                    </Typography>
-                  </Box>
-                </Box>
-              ))}
-              {(preview.diff || []).length > 100 && (
-                <Typography variant="pi" textColor="neutral500">
-                  {formatMessage(
-                    {
-                      id: `${pluginId}.preview.truncated`,
+                  <Typography variant="pi" textColor="neutral600">
+                    {formatMessage({
+                      id: `${pluginId}.preview.noDiffBody`,
                       defaultMessage:
-                        "Showing first 100 of {total} changes.",
-                    },
-                    { total: preview.diff.length }
-                  )}
-                </Typography>
-              )}
-            </Box>
+                        "The translated content matches what is already saved in this locale.",
+                    })}
+                  </Typography>
+                </Flex>
+              </Box>
+            ) : (
+              <Flex direction="column" alignItems="stretch" gap={2}>
+                <Flex
+                  justifyContent="space-between"
+                  alignItems="baseline"
+                  paddingLeft={1}
+                  paddingRight={1}
+                >
+                  <Typography
+                    variant="sigma"
+                    textColor="neutral600"
+                  >
+                    {formatMessage({
+                      id: `${pluginId}.preview.changesHeader`,
+                      defaultMessage: "Changes",
+                    })}
+                  </Typography>
+                  <Flex gap={3} alignItems="center">
+                    <Flex gap={1} alignItems="center">
+                      <Box
+                        background="danger600"
+                        hasRadius
+                        aria-hidden
+                        style={{ width: "0.5rem", height: "0.5rem" }}
+                      />
+                      <Typography variant="pi" textColor="neutral600">
+                        {formatMessage({
+                          id: `${pluginId}.preview.legendBefore`,
+                          defaultMessage: "Current",
+                        })}
+                      </Typography>
+                    </Flex>
+                    <Flex gap={1} alignItems="center">
+                      <Box
+                        background="success600"
+                        hasRadius
+                        aria-hidden
+                        style={{ width: "0.5rem", height: "0.5rem" }}
+                      />
+                      <Typography variant="pi" textColor="neutral600">
+                        {formatMessage({
+                          id: `${pluginId}.preview.legendAfter`,
+                          defaultMessage: "Translated",
+                        })}
+                      </Typography>
+                    </Flex>
+                  </Flex>
+                </Flex>
+                <Box style={{ maxHeight: 420, overflowY: "auto" }}>
+                  <Flex direction="column" alignItems="stretch" gap={2}>
+                    {(preview.diff || []).slice(0, 100).map((d, i) => {
+                      const before = renderDiffValue(d.before);
+                      const after = renderDiffValue(d.after);
+                      return (
+                        <Box
+                          key={i}
+                          background="neutral0"
+                          hasRadius
+                          borderColor="neutral200"
+                          borderWidth="1px"
+                          borderStyle="solid"
+                          shadow="tableShadow"
+                        >
+                          <Box
+                            paddingTop={2}
+                            paddingBottom={2}
+                            paddingLeft={3}
+                            paddingRight={3}
+                            background="neutral100"
+                            borderColor="neutral200"
+                            style={{ borderBottomWidth: 1, borderBottomStyle: "solid" }}
+                          >
+                            <Typography
+                              variant="pi"
+                              fontWeight="bold"
+                              textColor="neutral700"
+                              title={d.path}
+                            >
+                              {humanizePath(d.path)}
+                            </Typography>
+                          </Box>
+                          <Flex
+                            direction="column"
+                            alignItems="stretch"
+                            gap={0}
+                          >
+                            <Box
+                              paddingTop={2}
+                              paddingBottom={2}
+                              paddingLeft={3}
+                              paddingRight={3}
+                              style={{
+                                borderLeft: "3px solid var(--danger600, #d02b20)",
+                              }}
+                            >
+                              <Typography
+                                variant="pi"
+                                textColor="danger700"
+                                fontWeight="bold"
+                                tag="div"
+                              >
+                                {formatMessage({
+                                  id: `${pluginId}.preview.before`,
+                                  defaultMessage: "Current",
+                                })}
+                              </Typography>
+                              <Box paddingTop={1}>
+                                <Typography
+                                  variant="pi"
+                                  textColor={before.muted ? "neutral500" : "neutral800"}
+                                  tag="div"
+                                  style={{
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                    fontStyle: before.muted ? "italic" : "normal",
+                                  }}
+                                >
+                                  {before.text}
+                                </Typography>
+                              </Box>
+                            </Box>
+                            <Box
+                              paddingTop={2}
+                              paddingBottom={2}
+                              paddingLeft={3}
+                              paddingRight={3}
+                              background="success100"
+                              style={{
+                                borderLeft: "3px solid var(--success600, #328048)",
+                              }}
+                            >
+                              <Typography
+                                variant="pi"
+                                textColor="success700"
+                                fontWeight="bold"
+                                tag="div"
+                              >
+                                {formatMessage({
+                                  id: `${pluginId}.preview.after`,
+                                  defaultMessage: "Translated",
+                                })}
+                              </Typography>
+                              <Box paddingTop={1}>
+                                <Typography
+                                  variant="pi"
+                                  textColor={after.muted ? "neutral500" : "neutral800"}
+                                  tag="div"
+                                  style={{
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                    fontStyle: after.muted ? "italic" : "normal",
+                                  }}
+                                >
+                                  {after.text}
+                                </Typography>
+                              </Box>
+                            </Box>
+                          </Flex>
+                        </Box>
+                      );
+                    })}
+                    {(preview.diff || []).length > 100 && (
+                      <Box padding={2}>
+                        <Typography variant="pi" textColor="neutral500">
+                          {formatMessage(
+                            {
+                              id: `${pluginId}.preview.truncated`,
+                              defaultMessage:
+                                "Showing first 100 of {total} changes.",
+                            },
+                            { total: preview.diff.length }
+                          )}
+                        </Typography>
+                      </Box>
+                    )}
+                  </Flex>
+                </Box>
+              </Flex>
+            )}
           </Flex>
         )}
 
