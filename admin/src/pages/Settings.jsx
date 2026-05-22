@@ -857,7 +857,7 @@ const DiagnosticsCard = ({
         </Button>
       }
     >
-      <Flex gap={4} wrap="wrap">
+      <Flex gap={4} wrap="wrap" alignItems="stretch">
         <Box
           flex="1"
           minWidth="240px"
