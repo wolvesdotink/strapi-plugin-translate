@@ -1,24 +1,26 @@
 // Document Action that renders a "Translate" button in the Edit View dropdown.
-// Opens a modal that walks through three phases:
-//   pick     — choose one or more target locales and start a translation job
-//   running  — live progress bar (polls GET /translate/jobs/:id) + per-target
-//              checklist + cancel
-//   summary  — terminal screen for done | partial | failed | cancelled, with
-//              per-target outcomes and per-locale "Open" buttons
+// Walks the user through four phases:
+//   pick     — choose one or more target locales, optionally request a preview
+//   running  — live progress bar (polls GET /translate/jobs/:id)
+//   preview  — single-target preview: review the proposed payload diff before
+//              committing it
+//   summary  — terminal screen for done | partial | failed | cancelled
 //
-// A single job can fan out across multiple target locales; the backend
-// processes them sequentially. If the user picked exactly one locale and it
-// succeeded cleanly, we keep the prior UX of auto-reloading the editor in
-// that locale (no extra click). Otherwise we stay on the source and let the
-// user pick where to go next.
+// Beyond locale picking, the pick step also shows:
+//   • per-locale status pills (which locales already have content)
+//   • a cost/token estimate updated when the selection changes
+//   • a "Preview first" toggle (single-target only)
+//   • last-selected locales remembered per (user, model) via localStorage
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { useFetchClient, useNotification } from "@strapi/strapi/admin";
 import {
   Alert,
+  Badge,
   Box,
   Button,
+  Checkbox,
   Field,
   Flex,
   Modal,
@@ -34,21 +36,21 @@ import {
   CrossCircle,
   Earth,
   Loader,
+  WarningCircle,
 } from "@strapi/icons";
 import pluginId from "../pluginId";
 
 const POLL_INTERVAL_MS = 1000;
+const ESTIMATE_DEBOUNCE_MS = 350;
 
-// User-facing names for the three internal format groups. The technical labels
-// (plain/html/blocks) leak implementation detail; "Text / Rich text / Editor"
-// matches what an editor actually thinks of these fields as.
+const LAST_LOCALES_KEY_PREFIX = "strapi-plugin-translate:last-locales:";
+
 const FORMAT_LABELS = {
   plain: "Text",
   html: "Rich text",
   blocks: "Editor",
 };
 
-// Per-state visual mapping for the per-target checklist.
 const TARGET_STATE_INFO = {
   pending: { Icon: Clock, color: "neutral500", labelKey: "state.pending", labelDefault: "Queued" },
   running: { Icon: Loader, color: "primary600", labelKey: "state.running", labelDefault: "Translating…" },
@@ -79,6 +81,53 @@ const extractErrorMessage = (err) =>
   (err && err.message) ||
   "Unknown error";
 
+// Locale memo storage key — scoped by content type so a Page's last targets
+// don't leak into a Product's pick step.
+const lastLocalesKey = (model) =>
+  `${LAST_LOCALES_KEY_PREFIX}${model || "global"}`;
+
+const readLastLocales = (model) => {
+  try {
+    const raw = window.localStorage.getItem(lastLocalesKey(model));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeLastLocales = (model, locales) => {
+  try {
+    window.localStorage.setItem(
+      lastLocalesKey(model),
+      JSON.stringify(locales)
+    );
+  } catch {
+    /* localStorage unavailable — best-effort */
+  }
+};
+
+const formatCost = (n) => {
+  if (typeof n !== "number" || !isFinite(n)) return null;
+  if (n < 0.01) return "<$0.01";
+  return `$${n.toFixed(2)}`;
+};
+
+const formatTokens = (n) => {
+  if (typeof n !== "number" || !isFinite(n) || n <= 0) return "0";
+  if (n < 1000) return String(n);
+  return `${(n / 1000).toFixed(1)}k`;
+};
+
+// Truncate a long string for diff display. Diff values for richtext/blocks
+// can be huge; show the first ~200 chars with an ellipsis.
+const truncate = (v, n = 240) => {
+  if (typeof v !== "string") return JSON.stringify(v);
+  if (v.length <= n) return v;
+  return `${v.slice(0, n)}…`;
+};
+
 const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
   const { formatMessage } = useIntl();
   const { get, post } = useFetchClient();
@@ -86,37 +135,95 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
 
   const [phase, setPhase] = useState("pick");
   const [allLocales, setAllLocales] = useState([]);
-  const [targets, setTargets] = useState([]);
+  const [targets, setTargets] = useState(() => readLastLocales(model));
   const [jobId, setJobId] = useState(null);
   const [job, setJob] = useState(null);
   const [error, setError] = useState(null);
   const [cancelling, setCancelling] = useState(false);
   const [starting, setStarting] = useState(false);
 
-  // Load locales once on mount.
+  // Preview-flow state
+  const [previewMode, setPreviewMode] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [committingPreview, setCommittingPreview] = useState(false);
+
+  // Cost estimate + locale-status pills
+  const [localeStatus, setLocaleStatus] = useState([]);
+  const [localesError, setLocalesError] = useState(null);
+  const [localeStatusError, setLocaleStatusError] = useState(null);
+  const [estimate, setEstimate] = useState(null);
+  const [estimateLoading, setEstimateLoading] = useState(false);
+  const [estimateError, setEstimateError] = useState(null);
+
+  // Load locales + per-locale status of this entry once on mount.
   useEffect(() => {
     let cancelled = false;
     get(`/translate/locales`)
       .then((res) => {
         if (cancelled) return;
         setAllLocales(res.data || []);
+        setLocalesError(null);
       })
       .catch((err) => {
-        if (!cancelled) {
-          // eslint-disable-next-line no-console
-          console.warn("[translate] could not fetch locales", err);
-        }
+        if (cancelled) return;
+        // eslint-disable-next-line no-console
+        console.warn("[translate] could not fetch locales", err);
+        setLocalesError(extractErrorMessage(err));
       });
+    if (model && documentId) {
+      post(`/translate/content/locale-status`, { uid: model, documentId })
+        .then((res) => {
+          if (cancelled) return;
+          setLocaleStatus(res.data?.locales || []);
+          setLocaleStatusError(null);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          // eslint-disable-next-line no-console
+          console.warn("[translate] could not fetch locale status", err);
+          setLocaleStatusError(extractErrorMessage(err));
+        });
+    }
     return () => {
       cancelled = true;
     };
-  }, [get]);
+  }, [get, post, model, documentId]);
+
+  // Debounced /estimate call whenever targets change.
+  useEffect(() => {
+    if (phase !== "pick") return undefined;
+    if (!model || !documentId || targets.length === 0) {
+      setEstimate(null);
+      setEstimateError(null);
+      return undefined;
+    }
+    const handle = setTimeout(async () => {
+      setEstimateLoading(true);
+      setEstimateError(null);
+      try {
+        const res = await post(`/translate/estimate`, {
+          uid: model,
+          documentId,
+          sourceLocale,
+          targetLocales: targets,
+        });
+        setEstimate(res.data);
+      } catch (err) {
+        setEstimateError(extractErrorMessage(err));
+        setEstimate(null);
+      } finally {
+        setEstimateLoading(false);
+      }
+    }, ESTIMATE_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targets, phase, model, documentId, sourceLocale]);
 
   // Poll job status while running.
   useEffect(() => {
     if (phase !== "running" || !jobId) return undefined;
     let cancelled = false;
-
     const tick = async () => {
       try {
         const res = await get(`/translate/jobs/${jobId}`);
@@ -124,8 +231,6 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
         const jobData = res.data;
         if (jobData) setJob(jobData);
         if (!jobData) return;
-        // Anything terminal moves us to the summary screen. The summary
-        // distinguishes done / partial / failed / cancelled per-target.
         if (
           jobData.state === "done" ||
           jobData.state === "partial" ||
@@ -138,15 +243,12 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
         }
       } catch (err) {
         if (cancelled) return;
-        // Network blip during polling — keep trying. If the job genuinely
-        // 404s (server restart), surface as failure.
         if (err?.response?.status === 404) {
           setError("Translation job lost (server may have restarted)");
           setPhase("summary");
         }
       }
     };
-
     tick();
     const interval = setInterval(tick, POLL_INTERVAL_MS);
     return () => {
@@ -167,8 +269,36 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
     return m;
   }, [allLocales]);
   const localeName = (code) => localeNameMap[code] || code;
+  const sourceDisplayName =
+    localeNameMap[sourceLocale] || sourceLocale || "current locale";
 
-  const sourceDisplayName = localeNameMap[sourceLocale] || sourceLocale || "current locale";
+  // Filter remembered locales to ones that still exist in the project.
+  useEffect(() => {
+    if (targetLocales.length === 0) return;
+    const valid = new Set(targetLocales.map((l) => l.code));
+    setTargets((cur) => {
+      const next = cur.filter((c) => valid.has(c));
+      return next.length === cur.length ? cur : next;
+    });
+  }, [targetLocales]);
+
+  const localeStatusByCode = useMemo(() => {
+    const out = {};
+    for (const s of localeStatus) out[s.locale] = s;
+    return out;
+  }, [localeStatus]);
+
+  const overwriteTargets = targets.filter(
+    (code) => localeStatusByCode[code]?.exists
+  );
+  // Locales whose status probe failed — we can't say whether they have
+  // content, so warn instead of staying silent.
+  const unknownTargets = targets.filter(
+    (code) => localeStatusByCode[code]?.unknown
+  );
+
+  const previewAvailable = targets.length === 1;
+  const effectivePreview = previewMode && previewAvailable;
 
   // Pending until we have a job snapshot. Build a placeholder list from the
   // picker selection so the running screen has something to render before the
@@ -184,15 +314,10 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
   const totalTargets = jobTargets.length;
   const activeTarget = activeIdx >= 0 ? jobTargets[activeIdx] : null;
 
-  // Per-active-target chunk progress (drives the "X/Y chunks" line + breakdown).
   const activeChunks = activeTarget
     ? sumProgress(activeTarget.progress)
     : { done: 0, total: 0 };
 
-  // Overall percentage uses an equal-slice model: each target is 1/N of the
-  // total bar; the currently-running one contributes its chunk fraction of
-  // its slice. This stays stable as targets cycle (real chunk totals only
-  // become known once a target starts).
   const finishedSlices = jobTargets.filter(
     (t) => t.state === "done" || t.state === "failed" || t.state === "cancelled"
   ).length;
@@ -208,7 +333,6 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
         )
       : 0;
 
-  // Build the breakdown for the active target only (drops empty groups).
   const activeBreakdown = activeTarget
     ? ["plain", "html", "blocks"]
         .filter((k) => (activeTarget.progress[k]?.total || 0) > 0)
@@ -220,7 +344,6 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
         }))
     : [];
 
-  // Summary counts (for the terminal screen alert).
   const doneCount = jobTargets.filter((t) => t.state === "done").length;
   const failedCount = jobTargets.filter((t) => t.state === "failed").length;
   const cancelledCount = jobTargets.filter((t) => t.state === "cancelled").length;
@@ -229,8 +352,6 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
     0
   );
 
-  // Whether the prior "auto-reload into the new locale on success" UX applies.
-  // Only when the user picked exactly one locale and it finished cleanly.
   const isSingleTargetCleanSuccess =
     phase === "summary" &&
     totalTargets === 1 &&
@@ -246,7 +367,6 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
     window.location.href = url.toString();
   };
 
-  // Auto-reload for the single-locale-clean-success path (preserves prior UX).
   useEffect(() => {
     if (!isSingleTargetCleanSuccess) return;
     const locale = jobTargets[0].locale;
@@ -263,7 +383,6 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
     reloadInLocale(locale);
   }, [isSingleTargetCleanSuccess]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Toast on multi-locale completion (informational).
   useEffect(() => {
     if (phase !== "summary" || isSingleTargetCleanSuccess) return;
     if (totalTargets <= 1) return;
@@ -306,6 +425,15 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
       });
       return;
     }
+    // Persist before launching so a refresh during running still remembers.
+    writeLastLocales(model, targets);
+
+    // Preview branch — single-target only, short-circuits the job flow.
+    if (effectivePreview) {
+      await startPreview();
+      return;
+    }
+
     setStarting(true);
     try {
       const res = await post(`/translate/document`, {
@@ -336,24 +464,291 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
     }
   };
 
+  const startPreview = async () => {
+    setPreviewLoading(true);
+    setError(null);
+    try {
+      const res = await post(`/translate/preview`, {
+        uid: model,
+        documentId,
+        sourceLocale,
+        targetLocale: targets[0],
+      });
+      setPreview(res.data);
+      setPhase("preview");
+    } catch (err) {
+      const message = extractErrorMessage(err);
+      // Stay on the pick phase so the user can retry; the toast surfaces
+      // the error and the picker is re-enabled because previewLoading
+      // clears in the finally block. Jumping to summary would dead-end the
+      // flow (no retry affordance, only Close).
+      setError(message);
+      toggleNotification({
+        type: "danger",
+        message: formatMessage(
+          {
+            id: `${pluginId}.toast.previewFailure`,
+            defaultMessage: "Preview failed: {error}",
+          },
+          { error: message }
+        ),
+      });
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const acceptPreview = async () => {
+    if (!preview?.previewId) return;
+    setCommittingPreview(true);
+    try {
+      await post(`/translate/preview/${preview.previewId}/accept`);
+      toggleNotification({
+        type: "success",
+        message: formatMessage(
+          {
+            id: `${pluginId}.toast.previewAccepted`,
+            defaultMessage: "Saved translation to {locale}. Reloading…",
+          },
+          { locale: localeName(targets[0]) }
+        ),
+      });
+      reloadInLocale(targets[0]);
+    } catch (err) {
+      toggleNotification({
+        type: "danger",
+        message: formatMessage(
+          {
+            id: `${pluginId}.toast.previewAcceptFailed`,
+            defaultMessage: "Failed to apply preview: {error}",
+          },
+          { error: extractErrorMessage(err) }
+        ),
+      });
+      setCommittingPreview(false);
+    }
+  };
+
+  const discardPreview = async () => {
+    if (!preview?.previewId) {
+      onClose();
+      return;
+    }
+    try {
+      await post(`/translate/preview/${preview.previewId}/discard`);
+    } catch {
+      /* best effort — preview will TTL out anyway */
+    }
+    onClose();
+  };
+
   const requestCancel = async () => {
     if (!jobId || cancelling) return;
     setCancelling(true);
     try {
       await post(`/translate/jobs/${jobId}/cancel`);
     } catch (err) {
-      // Even if cancel fails (e.g. already-terminal), polling will surface
-      // the final state.
       // eslint-disable-next-line no-console
       console.warn("[translate] cancel request failed", err);
     }
   };
 
-  const selectAll = () =>
-    setTargets(targetLocales.map((l) => l.code));
+  const selectAll = () => setTargets(targetLocales.map((l) => l.code));
   const clearAll = () => setTargets([]);
 
   // ---------- Render helpers ----------
+
+  const renderStatusPills = () => {
+    if (targetLocales.length === 0) return null;
+    return (
+      <Flex
+        gap={2}
+        wrap="wrap"
+        alignItems="center"
+        paddingTop={1}
+        paddingBottom={1}
+      >
+        <Typography variant="pi" textColor="neutral600" fontWeight="bold">
+          {formatMessage({
+            id: `${pluginId}.dialog.entryStatus`,
+            defaultMessage: "Status of this entry:",
+          })}
+        </Typography>
+        {targetLocales.map((l) => {
+          const s = localeStatusByCode[l.code];
+          const exists = !!s?.exists;
+          return (
+            <Badge
+              key={l.code}
+              backgroundColor={exists ? "success100" : "neutral150"}
+              textColor={exists ? "success700" : "neutral700"}
+              size="S"
+            >
+              {l.code.toUpperCase()} {exists ? "✓" : "—"}
+            </Badge>
+          );
+        })}
+      </Flex>
+    );
+  };
+
+  const renderEstimateCard = () => {
+    if (targets.length === 0) return null;
+    return (
+      <Box
+        padding={3}
+        background="neutral100"
+        hasRadius
+        borderColor="neutral200"
+        borderWidth="1px"
+        borderStyle="solid"
+      >
+        <Flex direction="column" alignItems="stretch" gap={2}>
+          <Flex justifyContent="space-between" alignItems="baseline" gap={3}>
+            <Typography variant="pi" fontWeight="bold" textColor="neutral700">
+              {formatMessage({
+                id: `${pluginId}.dialog.estimateTitle`,
+                defaultMessage: "Translation estimate",
+              })}
+            </Typography>
+            {estimateLoading && (
+              <Typography variant="pi" textColor="neutral500">
+                {formatMessage({
+                  id: `${pluginId}.dialog.estimateLoading`,
+                  defaultMessage: "Calculating…",
+                })}
+              </Typography>
+            )}
+          </Flex>
+          {estimateError && (
+            <Typography variant="pi" textColor="danger600">
+              {estimateError}
+            </Typography>
+          )}
+          {estimate && (
+            <Flex direction="column" gap={1} alignItems="stretch">
+              <Flex gap={4} wrap="wrap">
+                <Typography variant="pi" textColor="neutral700">
+                  <strong>
+                    {formatTokens(estimate.inputTokens)}
+                  </strong>{" "}
+                  {formatMessage({
+                    id: `${pluginId}.dialog.estimateInputTokens`,
+                    defaultMessage: "input tokens",
+                  })}
+                </Typography>
+                <Typography variant="pi" textColor="neutral700">
+                  ~
+                  <strong>{formatTokens(estimate.estimatedOutputTokens)}</strong>{" "}
+                  {formatMessage({
+                    id: `${pluginId}.dialog.estimateOutputTokens`,
+                    defaultMessage: "output tokens",
+                  })}
+                </Typography>
+                {formatCost(estimate.estimatedCostUsd) && (
+                  <Typography variant="pi" textColor="primary700">
+                    <strong>
+                      ≈{formatCost(estimate.estimatedCostUsd)}
+                    </strong>{" "}
+                    {formatMessage(
+                      {
+                        id: `${pluginId}.dialog.estimateCostSuffix`,
+                        defaultMessage:
+                          "across {count, plural, one {# locale} other {# locales}}",
+                      },
+                      { count: estimate.targets }
+                    )}
+                  </Typography>
+                )}
+              </Flex>
+              <Flex gap={3} wrap="wrap">
+                {["plain", "html", "blocks"]
+                  .filter((k) => (estimate.groups?.[k]?.items || 0) > 0)
+                  .map((k, i, arr) => (
+                    <React.Fragment key={k}>
+                      <Typography variant="pi" textColor="neutral600">
+                        {estimate.groups[k].items} {FORMAT_LABELS[k]}
+                      </Typography>
+                      {i < arr.length - 1 && (
+                        <Typography variant="pi" textColor="neutral400">
+                          ·
+                        </Typography>
+                      )}
+                    </React.Fragment>
+                  ))}
+              </Flex>
+              {Array.isArray(estimate.components) && estimate.components.length > 0 && (
+                <Typography variant="pi" textColor="neutral600">
+                  {formatMessage(
+                    {
+                      id: `${pluginId}.dialog.estimateComponents`,
+                      defaultMessage:
+                        "Components: {names}",
+                    },
+                    {
+                      names: estimate.components
+                        .map((c) => c.split(".").pop())
+                        .join(", "),
+                    }
+                  )}
+                </Typography>
+              )}
+            </Flex>
+          )}
+          {overwriteTargets.length > 0 && (
+            <Flex
+              gap={2}
+              alignItems="center"
+              padding={2}
+              background="warning100"
+              hasRadius
+            >
+              <Box color="warning700" aria-hidden>
+                <WarningCircle width="1rem" height="1rem" />
+              </Box>
+              <Typography variant="pi" textColor="warning700">
+                {formatMessage(
+                  {
+                    id: `${pluginId}.dialog.overwriteWarning`,
+                    defaultMessage:
+                      "{count, plural, one {# locale already has} other {# locales already have}} content and will be overwritten: {names}",
+                  },
+                  {
+                    count: overwriteTargets.length,
+                    names: overwriteTargets
+                      .map((c) => localeName(c))
+                      .join(", "),
+                  }
+                )}
+              </Typography>
+            </Flex>
+          )}
+          {(unknownTargets.length > 0 || localeStatusError) && (
+            <Flex
+              gap={2}
+              alignItems="center"
+              padding={2}
+              background="warning100"
+              hasRadius
+            >
+              <Box color="warning700" aria-hidden>
+                <WarningCircle width="1rem" height="1rem" />
+              </Box>
+              <Typography variant="pi" textColor="warning700">
+                {formatMessage(
+                  {
+                    id: `${pluginId}.dialog.overwriteUnknown`,
+                    defaultMessage:
+                      "Could not check whether the target locale(s) already have content; they may be overwritten.",
+                  }
+                )}
+              </Typography>
+            </Flex>
+          )}
+        </Flex>
+      </Box>
+    );
+  };
 
   const renderTargetList = ({ highlightActive }) => (
     <Flex direction="column" alignItems="stretch" gap={1}>
@@ -452,7 +847,6 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
     </Flex>
   );
 
-  // Summary-screen Alert variant + title.
   const summaryAlert = () => {
     if (failedCount === totalTargets && doneCount === 0) {
       return {
@@ -470,12 +864,10 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
     if (cancelledCount > 0 && doneCount < totalTargets) {
       return {
         variant: "default",
-        title: formatMessage(
-          {
-            id: `${pluginId}.summary.cancelled`,
-            defaultMessage: "Translation cancelled",
-          }
-        ),
+        title: formatMessage({
+          id: `${pluginId}.summary.cancelled`,
+          defaultMessage: "Translation cancelled",
+        }),
         body: formatMessage(
           {
             id: `${pluginId}.summary.cancelledBody`,
@@ -503,7 +895,6 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
         }),
       };
     }
-    // All done.
     if (warningsCount > 0) {
       return {
         variant: "warning",
@@ -530,9 +921,7 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
         {
           id: `${pluginId}.summary.allDone`,
           defaultMessage:
-            totalTargets === 1
-              ? "Translated to {count} locale"
-              : "Translated to {count} locales",
+            "Translated to {count, plural, one {# locale} other {# locales}}",
         },
         { count: doneCount }
       ),
@@ -648,7 +1037,52 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
                   </MultiSelectOption>
                 ))}
               </MultiSelect>
+              {localesError && (
+                <Field.Error>
+                  {formatMessage(
+                    {
+                      id: `${pluginId}.dialog.localesFetchError`,
+                      defaultMessage:
+                        "Could not load locales: {error}",
+                    },
+                    { error: localesError }
+                  )}
+                </Field.Error>
+              )}
             </Field.Root>
+
+            {renderStatusPills()}
+
+            {error && (
+              <Alert
+                variant="danger"
+                title={formatMessage({
+                  id: `${pluginId}.dialog.pickErrorTitle`,
+                  defaultMessage: "Last attempt failed",
+                })}
+                closeLabel=""
+              >
+                {error}
+              </Alert>
+            )}
+
+            {targets.length > 0 && renderEstimateCard()}
+
+            {previewAvailable && (
+              <Flex gap={2} alignItems="center">
+                <Checkbox
+                  name="preview-mode"
+                  checked={previewMode}
+                  onCheckedChange={(v) => setPreviewMode(!!v)}
+                >
+                  {formatMessage({
+                    id: `${pluginId}.dialog.previewToggle`,
+                    defaultMessage:
+                      "Preview before saving (review diff before overwriting)",
+                  })}
+                </Checkbox>
+              </Flex>
+            )}
           </Flex>
         )}
 
@@ -750,6 +1184,110 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
           </Flex>
         )}
 
+        {phase === "preview" && preview && (
+          <Flex direction="column" alignItems="stretch" gap={4} padding={2}>
+            <Alert
+              variant="default"
+              title={formatMessage(
+                {
+                  id: `${pluginId}.preview.title`,
+                  defaultMessage: "Preview translation to {locale}",
+                },
+                { locale: localeName(targets[0]) }
+              )}
+              closeLabel=""
+            >
+              {formatMessage(
+                {
+                  id: `${pluginId}.preview.intro`,
+                  defaultMessage:
+                    "Review the {count, plural, one {# proposed change} other {# proposed changes}} below. Nothing is saved until you click Apply.",
+                },
+                { count: preview.diff?.length || 0 }
+              )}
+            </Alert>
+
+            {preview.warnings && preview.warnings.length > 0 && (
+              <Alert
+                variant="warning"
+                title={formatMessage(
+                  {
+                    id: `${pluginId}.preview.warningsTitle`,
+                    defaultMessage:
+                      "{count, plural, one {# stale reference skipped} other {# stale references skipped}}",
+                  },
+                  { count: preview.warnings.length }
+                )}
+                closeLabel=""
+              >
+                {preview.warnings.map((w, i) => (
+                  <Box key={i} paddingTop={1}>
+                    <Typography variant="pi" textColor="warning700">
+                      {w.label} — {w.target}#{w.id}
+                    </Typography>
+                  </Box>
+                ))}
+              </Alert>
+            )}
+
+            <Box
+              padding={3}
+              background="neutral100"
+              hasRadius
+              borderColor="neutral200"
+              borderWidth="1px"
+              borderStyle="solid"
+              style={{ maxHeight: 360, overflowY: "auto" }}
+            >
+              {(preview.diff || []).length === 0 && (
+                <Typography variant="pi" textColor="neutral600">
+                  {formatMessage({
+                    id: `${pluginId}.preview.noDiff`,
+                    defaultMessage: "No textual differences detected.",
+                  })}
+                </Typography>
+              )}
+              {(preview.diff || []).slice(0, 100).map((d, i) => (
+                <Box key={i} paddingBottom={2}>
+                  <Typography variant="pi" fontWeight="bold" textColor="neutral700">
+                    {d.path}
+                  </Typography>
+                  <Box paddingTop={1}>
+                    <Typography
+                      variant="pi"
+                      textColor="danger700"
+                      tag="div"
+                      style={{ whiteSpace: "pre-wrap" }}
+                    >
+                      − {truncate(d.before)}
+                    </Typography>
+                    <Typography
+                      variant="pi"
+                      textColor="success700"
+                      tag="div"
+                      style={{ whiteSpace: "pre-wrap" }}
+                    >
+                      + {truncate(d.after)}
+                    </Typography>
+                  </Box>
+                </Box>
+              ))}
+              {(preview.diff || []).length > 100 && (
+                <Typography variant="pi" textColor="neutral500">
+                  {formatMessage(
+                    {
+                      id: `${pluginId}.preview.truncated`,
+                      defaultMessage:
+                        "Showing first 100 of {total} changes.",
+                    },
+                    { total: preview.diff.length }
+                  )}
+                </Typography>
+              )}
+            </Box>
+          </Flex>
+        )}
+
         {phase === "summary" && !isSingleTargetCleanSuccess && (
           <Flex direction="column" alignItems="stretch" gap={4} padding={2}>
             {(() => {
@@ -768,7 +1306,6 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
                 </Alert>
               );
             })()}
-
             {totalTargets > 0 && renderTargetList({ highlightActive: false })}
           </Flex>
         )}
@@ -811,10 +1348,15 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
             <Button
               startIcon={<Earth />}
               onClick={startTranslation}
-              loading={starting}
-              disabled={targets.length === 0 || starting}
+              loading={starting || previewLoading}
+              disabled={targets.length === 0 || starting || previewLoading}
             >
-              {targets.length > 1
+              {effectivePreview
+                ? formatMessage({
+                    id: `${pluginId}.action.startPreview`,
+                    defaultMessage: "Generate preview",
+                  })
+                : targets.length > 1
                 ? formatMessage(
                     {
                       id: `${pluginId}.action.startMulti`,
@@ -850,6 +1392,31 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
           </Flex>
         )}
 
+        {phase === "preview" && (
+          <Flex gap={2} justifyContent="flex-end" width="100%">
+            <Button
+              variant="tertiary"
+              onClick={discardPreview}
+              disabled={committingPreview}
+            >
+              {formatMessage({
+                id: `${pluginId}.preview.discard`,
+                defaultMessage: "Discard",
+              })}
+            </Button>
+            <Button
+              onClick={acceptPreview}
+              loading={committingPreview}
+              disabled={committingPreview}
+            >
+              {formatMessage({
+                id: `${pluginId}.preview.accept`,
+                defaultMessage: "Apply translation",
+              })}
+            </Button>
+          </Flex>
+        )}
+
         {phase === "summary" && (
           <Flex gap={2} justifyContent="flex-end" width="100%">
             {isSingleTargetCleanSuccess ? (
@@ -877,11 +1444,7 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
 const TranslateAction = ({ documentId, model, document }) => {
   const { formatMessage } = useIntl();
 
-  // Single-type URLs have no :id segment, so the router-derived `documentId`
-  // is undefined. The loaded document object carries the real id — prefer it.
   const effectiveDocumentId = documentId || document?.documentId;
-
-  // The current locale of the document being edited.
   const sourceLocale =
     (document && document.locale) ||
     (typeof window !== "undefined"
@@ -890,7 +1453,6 @@ const TranslateAction = ({ documentId, model, document }) => {
         )
       : null);
 
-  // Hide the action on create-new flows (no document exists yet).
   if (!model || !effectiveDocumentId) return null;
 
   return {

@@ -31,6 +31,21 @@ const userCanOnUid = (ctx, uid, actions) => {
   return actions.every((action) => ability.can(action, uid));
 };
 
+// Fail-closed RBAC check for in-controller filtering. Returns true if the
+// caller can perform `action` on `uid`. If userAbility isn't attached, this
+// returns false — listJobs/contentTypes use this so a missing ability does
+// NOT leak the full job/CT registry.
+const userCanOrDeny = (ctx, uid, action) => {
+  const ability = ctx.state?.userAbility;
+  if (!ability) return false;
+  if (!uid) return true;
+  try {
+    return !!ability.can(action, uid);
+  } catch {
+    return false;
+  }
+};
+
 // Derive the overall job state from per-target states once the loop ends.
 // - all done                                  -> "done"
 // - mix of done + failed                      -> "partial"
@@ -266,6 +281,38 @@ module.exports = ({ strapi }) => {
       });
       job.state = "running";
 
+      // Derive a per-locale aggregate state from every doc's same-locale
+      // target. Surfaced on the legacy top-level job.targets[] so JobHistory
+      // (and any other snapshot consumer) sees real progress instead of
+      // permanently-pending badges.
+      const aggregateTopLevelTargets = () => {
+        for (let li = 0; li < job.targets.length; li++) {
+          const locale = job.targets[li].locale;
+          let done = 0;
+          let failed = 0;
+          let cancelled = 0;
+          let pending = 0;
+          let running = 0;
+          for (const d of job.documents) {
+            const t = d.targets[li];
+            if (!t) continue;
+            if (t.state === "done") done += 1;
+            else if (t.state === "failed") failed += 1;
+            else if (t.state === "cancelled") cancelled += 1;
+            else if (t.state === "running") running += 1;
+            else pending += 1;
+          }
+          let agg;
+          if (running > 0) agg = "running";
+          else if (pending > 0 && done + failed + cancelled === 0) agg = "pending";
+          else if (cancelled > 0 && done < job.documents.length) agg = "cancelled";
+          else if (failed > 0 && done === 0) agg = "failed";
+          else if (failed > 0 || cancelled > 0 || pending > 0) agg = "partial";
+          else agg = "done";
+          job.targets[li].state = agg;
+        }
+      };
+
       (async () => {
         const docs = job.documents;
         for (let di = 0; di < docs.length; di++) {
@@ -273,8 +320,19 @@ module.exports = ({ strapi }) => {
           const doc = docs[di];
           doc.state = "running";
           let anyFailed = false;
+          let anyTargetRan = false;
           for (let ti = 0; ti < doc.targets.length; ti++) {
-            if (job.signal.aborted) break;
+            if (job.signal.aborted) {
+              // Mark untouched targets cancelled so the snapshot reflects
+              // reality instead of leaving them pending forever.
+              for (let tj = ti; tj < doc.targets.length; tj++) {
+                if (doc.targets[tj].state === "pending") {
+                  doc.targets[tj].state = "cancelled";
+                }
+              }
+              break;
+            }
+            anyTargetRan = true;
             const target = doc.targets[ti];
             target.state = "running";
             try {
@@ -301,6 +359,12 @@ module.exports = ({ strapi }) => {
               if (err?.name === "AbortError" || job.signal.aborted) {
                 target.state = "cancelled";
                 anyFailed = true;
+                // Mark the remaining untouched targets cancelled too.
+                for (let tj = ti + 1; tj < doc.targets.length; tj++) {
+                  if (doc.targets[tj].state === "pending") {
+                    doc.targets[tj].state = "cancelled";
+                  }
+                }
                 break;
               }
               target.state = "failed";
@@ -308,14 +372,27 @@ module.exports = ({ strapi }) => {
               anyFailed = true;
             }
           }
-          doc.state = doc.targets.every((t) => t.state === "done")
-            ? "done"
-            : doc.targets.some((t) => t.state === "done")
-            ? "partial"
-            : anyFailed
-            ? doc.targets.some((t) => t.state === "cancelled") ? "cancelled" : "failed"
-            : "done";
+          const allDone = doc.targets.every((t) => t.state === "done");
+          const anyDone = doc.targets.some((t) => t.state === "done");
+          const anyCancelled = doc.targets.some((t) => t.state === "cancelled");
+          if (allDone) {
+            doc.state = "done";
+          } else if (anyDone) {
+            doc.state = "partial";
+          } else if (!anyTargetRan && anyCancelled) {
+            doc.state = "cancelled";
+          } else if (anyFailed && anyCancelled) {
+            doc.state = "cancelled";
+          } else if (anyFailed) {
+            doc.state = "failed";
+          } else {
+            // No targets ran AND none are cancelled means the outer abort
+            // fired before this doc even started — treat as cancelled.
+            doc.state = "cancelled";
+          }
+          aggregateTopLevelTargets();
         }
+        aggregateTopLevelTargets();
         // Overall state derivation.
         const counts = { done: 0, failed: 0, cancelled: 0, partial: 0 };
         for (const d of docs) counts[d.state] = (counts[d.state] || 0) + 1;
@@ -349,7 +426,36 @@ module.exports = ({ strapi }) => {
       const { id } = ctx.params;
       const snapshot = jobs().get(id);
       if (!snapshot) return ctx.notFound("job not found");
+      if (snapshot.uid && !userCanOrDeny(ctx, snapshot.uid, READ_ACTION)) {
+        return ctx.notFound("job not found");
+      }
       ctx.body = snapshot;
+    },
+
+    /**
+     * GET /translate/jobs
+     * Query: limit (default 50, max 200)
+     * Returns the most recent jobs first. Used by the job history page.
+     */
+    async listJobs(ctx) {
+      const limit = Math.max(
+        1,
+        Math.min(200, parseInt(ctx.query?.limit, 10) || 50)
+      );
+      const all = jobs().list();
+      // Sort newest-first by startedAt, fall back to finishedAt
+      all.sort((a, b) => {
+        const ta = a.startedAt || 0;
+        const tb = b.startedAt || 0;
+        return tb - ta;
+      });
+      // Fail closed: when userAbility is missing, return no jobs rather than
+      // leaking the registry.
+      const filtered = all.filter((j) => userCanOrDeny(ctx, j.uid, READ_ACTION));
+      ctx.body = {
+        jobs: filtered.slice(0, limit),
+        total: filtered.length,
+      };
     },
 
     /**
@@ -357,6 +463,11 @@ module.exports = ({ strapi }) => {
      */
     async cancelJob(ctx) {
       const { id } = ctx.params;
+      const snapshot = jobs().get(id);
+      if (!snapshot) return ctx.notFound("job not found");
+      if (snapshot.uid && !userCanOrDeny(ctx, snapshot.uid, UPDATE_ACTION)) {
+        return ctx.notFound("job not found");
+      }
       const res = jobs().cancel(id);
       if (!res.ok && res.reason === "not-found") {
         return ctx.notFound("job not found");
@@ -402,9 +513,20 @@ module.exports = ({ strapi }) => {
         return ctx.badRequest("targetLocales is required");
       }
       const supported = await localesSvc().codes();
+      if (sourceLocale && !supported.has(sourceLocale)) {
+        return ctx.badRequest(`unsupported sourceLocale: ${sourceLocale}`);
+      }
       for (const code of rawTargets) {
+        if (typeof code !== "string" || !code) {
+          return ctx.badRequest("targetLocales must be non-empty strings");
+        }
         if (!supported.has(code)) {
           return ctx.badRequest(`unsupported targetLocale: ${code}`);
+        }
+        if (sourceLocale && code === sourceLocale) {
+          return ctx.badRequest(
+            `targetLocale ${code} matches sourceLocale; nothing to translate`
+          );
         }
       }
       try {
@@ -545,6 +667,157 @@ module.exports = ({ strapi }) => {
      */
     async cacheStats(ctx) {
       ctx.body = await cache().stats();
+    },
+
+    /**
+     * POST /translate/content/locale-status
+     * body: { uid, documentId }
+     * Returns per-locale status for the document — which locales exist as
+     * a draft. Used by the locale-status pills in the document action picker.
+     */
+    async localeStatus(ctx) {
+      const body = ctx.request.body || {};
+      const { uid, documentId } = body;
+      if (!uid || !documentId) {
+        return ctx.badRequest("uid and documentId are required");
+      }
+      const localesList = await localesSvc().list();
+      const out = [];
+      for (const l of localesList) {
+        try {
+          const entry = await strapi.documents(uid).findOne({
+            documentId,
+            locale: l.code,
+            status: "draft",
+          });
+          out.push({
+            locale: l.code,
+            name: l.name,
+            isDefault: !!l.isDefault,
+            exists: !!entry,
+            updatedAt: entry?.updatedAt || null,
+            publishedAt: entry?.publishedAt || null,
+          });
+        } catch (err) {
+          // The probe failed — we genuinely don't know whether this locale
+          // has content. Surface `unknown` so the UI can hide the
+          // 'safe to write' affordance instead of assuming exists:false.
+          strapi.log?.warn?.(
+            `[translate] localeStatus probe failed for ${uid} ${documentId} ${l.code}: ${err?.message || err}`
+          );
+          out.push({
+            locale: l.code,
+            name: l.name,
+            isDefault: !!l.isDefault,
+            exists: false,
+            unknown: true,
+            updatedAt: null,
+            publishedAt: null,
+          });
+        }
+      }
+      ctx.body = { locales: out };
+    },
+
+    /**
+     * GET /translate/content-types
+     * Lists content types that participate in i18n and have at least one
+     * translatable field. Used by the bulk translation page.
+     */
+    async contentTypes(ctx) {
+      const fieldsService = strapi.plugin("translate").service("translatable-fields");
+      const all = strapi.contentTypes || {};
+      const out = [];
+      for (const [uid, schema] of Object.entries(all)) {
+        if (!schema || typeof schema !== "object") continue;
+        if (!uid.startsWith("api::")) continue;
+        const localized = !!schema.pluginOptions?.i18n?.localized;
+        if (!localized) continue;
+        let attrs;
+        try {
+          attrs = fieldsService.describe(uid).attributes;
+        } catch {
+          continue;
+        }
+        const translatable = attrs.filter(
+          (a) =>
+            a.directive === "translate" &&
+            (a.type === "string" ||
+              a.type === "text" ||
+              a.type === "richtext" ||
+              a.type === "blocks" ||
+              a.type === "component" ||
+              a.type === "dynamiczone")
+        );
+        if (translatable.length === 0) continue;
+        // Fail closed: without userAbility we cannot prove the caller has
+        // read permission, so omit the CT from the listing.
+        if (!userCanOrDeny(ctx, uid, READ_ACTION)) continue;
+        out.push({
+          uid,
+          kind: schema.kind,
+          displayName:
+            schema.info?.displayName || schema.info?.singularName || uid,
+          translatableFieldCount: translatable.length,
+        });
+      }
+      out.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      ctx.body = { contentTypes: out };
+    },
+
+    /**
+     * POST /translate/content/list
+     * body: { uid, sourceLocale, limit?, start? }
+     * Returns documentIds + a best-effort label for the bulk picker.
+     */
+    async contentList(ctx) {
+      const body = ctx.request.body || {};
+      const { uid, sourceLocale } = body;
+      if (!uid) return ctx.badRequest("uid is required");
+      const supported = await localesSvc().codes();
+      const src =
+        sourceLocale && supported.has(sourceLocale) ? sourceLocale : null;
+
+      const limit = Math.max(1, Math.min(500, parseInt(body.limit, 10) || 100));
+      const start = Math.max(0, parseInt(body.start, 10) || 0);
+
+      const schema = strapi.getModel(uid);
+      // Strapi 5 stores the editor-chosen "display field" in content-manager
+      // configuration. Fall back to a list of conventional name fields so the
+      // picker still produces a readable label on schemas that haven't been
+      // configured.
+      const labelCandidates = [];
+      const cmMainField = schema?.info?.displayField;
+      if (cmMainField) labelCandidates.push(cmMainField);
+      for (const name of ["title", "name", "label", "heading", "slug"]) {
+        if (schema?.attributes?.[name] && !labelCandidates.includes(name)) {
+          labelCandidates.push(name);
+        }
+      }
+
+      const pickLabel = (d) => {
+        for (const f of labelCandidates) {
+          if (typeof d[f] === "string" && d[f]) return d[f];
+        }
+        return d.documentId;
+      };
+
+      try {
+        const docs = await strapi.documents(uid).findMany({
+          locale: src,
+          status: "draft",
+          start,
+          limit,
+        });
+        const list = (docs || []).map((d) => ({
+          documentId: d.documentId,
+          label: pickLabel(d),
+          updatedAt: d.updatedAt || null,
+        }));
+        ctx.body = { documents: list, start, limit, total: list.length };
+      } catch (err) {
+        ctx.throw(500, err.message);
+      }
     },
 
     /**

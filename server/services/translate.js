@@ -967,6 +967,8 @@ module.exports = ({ strapi }) => {
 
       // Per-locale cache-hit subtraction. The provider call is per-locale, so
       // a string that's cached for `en` may still need translation for `fr`.
+      // Also probes whether each target locale already has a draft entry so
+      // the UI can warn about overwriting non-empty content.
       const perLocale = [];
       for (const target of targets) {
         let cachedItems = 0;
@@ -994,10 +996,22 @@ module.exports = ({ strapi }) => {
         await checkOne(bag.plain, "plain");
         await checkOne(bag.html, "html");
         await checkOne(blocksFlat, "blocks");
+        let exists = false;
+        try {
+          const existing = await strapi.documents(uid).findOne({
+            documentId,
+            locale: target,
+            status: "draft",
+          });
+          exists = !!existing;
+        } catch {
+          exists = false;
+        }
         perLocale.push({
           locale: target,
           cachedItems,
           cachedChars,
+          exists,
         });
       }
 
@@ -1013,6 +1027,43 @@ module.exports = ({ strapi }) => {
         (blocksEst.estimatedCostUsd || 0);
       const totalCost = perLocaleCost ? perLocaleCost * targets.length : undefined;
 
+      // Summarise components / dynamic-zones that were walked so the picker
+      // can show editors "12 text fields · 3 rich-text · 1 dynamic zone (Hero,
+      // Gallery)" before they click translate.
+      const componentsSeen = new Set();
+      const collectComponents = (attrList, value, depth = 0) => {
+        if (depth > 6) return;
+        for (const attr of attrList) {
+          const v = value ? value[attr.name] : undefined;
+          if (v == null) continue;
+          if (attr.type === "component" && attr.component) {
+            componentsSeen.add(attr.component);
+            try {
+              const inner = fieldsService.describe(attr.component).attributes;
+              const arr = attr.repeatable && Array.isArray(v) ? v : [v];
+              for (const item of arr) {
+                if (item) collectComponents(inner, item, depth + 1);
+              }
+            } catch {
+              // ignore — unknown component
+            }
+          } else if (attr.type === "dynamiczone" && Array.isArray(v)) {
+            for (const item of v) {
+              if (item && item.__component) {
+                componentsSeen.add(item.__component);
+                try {
+                  const inner = fieldsService.describe(item.__component).attributes;
+                  collectComponents(inner, item, depth + 1);
+                } catch {
+                  // ignore — unknown component
+                }
+              }
+            }
+          }
+        }
+      };
+      collectComponents(ctDescriptor.attributes, source);
+
       return {
         inputTokens: totalInputTokens,
         estimatedOutputTokens: totalOutputTokens,
@@ -1023,6 +1074,7 @@ module.exports = ({ strapi }) => {
           html: { items: bag.html.length },
           blocks: { items: blocksFlat.length },
         },
+        components: [...componentsSeen],
         perLocale,
       };
     },

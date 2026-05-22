@@ -39,6 +39,26 @@ export default {
           Component: () => import("./pages/Settings"),
           permissions: [],
         },
+        {
+          id: `${pluginId}-bulk`,
+          intlLabel: {
+            id: `${pluginId}.bulk.menu`,
+            defaultMessage: "Bulk translate",
+          },
+          to: `/settings/${pluginId}/bulk`,
+          Component: () => import("./pages/BulkTranslate"),
+          permissions: [],
+        },
+        {
+          id: `${pluginId}-jobs`,
+          intlLabel: {
+            id: `${pluginId}.jobs.menu`,
+            defaultMessage: "History",
+          },
+          to: `/settings/${pluginId}/jobs`,
+          Component: () => import("./pages/JobHistory"),
+          permissions: [],
+        },
       ]
     );
   },

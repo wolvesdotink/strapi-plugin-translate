@@ -241,6 +241,73 @@ describe("translate orchestrator", () => {
     expect(est.estimatedCostUsd).toBeGreaterThan(0);
     expect(est.groups.plain.items).toBe(1); // title
     expect(est.groups.html.items).toBe(1); // body
+    // No existing entries for these locales in this test setup.
+    expect(est.perLocale.find((p) => p.locale === "en").exists).toBe(false);
+    expect(est.perLocale.find((p) => p.locale === "fr").exists).toBe(false);
+    expect(Array.isArray(est.components)).toBe(true);
+  });
+
+  it("estimate() flags existing target locales", async () => {
+    const provider = {
+      async translate({ text }) {
+        return text;
+      },
+      async usage() {
+        return { count: 0, limit: null };
+      },
+    };
+    const sourceEntry = {
+      documentId: "doc-1",
+      locale: "de",
+      title: "Hallo Welt",
+      body: null,
+      slug: null,
+      published: false,
+    };
+    const upserts = [];
+    const stored = new Map();
+    const strapi = {
+      log: { warn: () => {}, info: () => {}, error: () => {} },
+      config: { get: () => ({}) },
+      getModel: (uid) => models[uid],
+      db: { query: () => ({ async findMany() { return []; } }) },
+      documents: (uid) => ({
+        async findOne({ locale }) {
+          if (locale === "de") return sourceEntry;
+          if (locale === "en") {
+            return { documentId: "doc-1", locale: "en", title: "Hello" };
+          }
+          return null;
+        },
+        async update({ documentId, locale, data }) {
+          upserts.push({ uid, documentId, locale, data });
+          return { documentId, locale, ...data };
+        },
+      }),
+      store: (descriptor) => ({
+        async get() {
+          return stored.get(JSON.stringify(descriptor));
+        },
+        async set({ value }) {
+          stored.set(JSON.stringify(descriptor), value);
+        },
+      }),
+      requestContext: { get: () => ({ state: { user: { id: null } } }) },
+    };
+    const ns = makePlugin({ strapi, provider, models });
+    strapi.plugin = (id) => {
+      if (id === "translate") return ns;
+      return {};
+    };
+    const svc = translateFactory({ strapi });
+    const est = await svc.estimate({
+      uid: "api::page.page",
+      documentId: "doc-1",
+      sourceLocale: "de",
+      targetLocales: ["en", "fr"],
+    });
+    expect(est.perLocale.find((p) => p.locale === "en").exists).toBe(true);
+    expect(est.perLocale.find((p) => p.locale === "fr").exists).toBe(false);
   });
 
   it("translateDocumentDry returns the proposed payload without upserting", async () => {

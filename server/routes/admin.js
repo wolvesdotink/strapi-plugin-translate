@@ -70,6 +70,12 @@ module.exports = [
   },
   {
     method: "GET",
+    path: "/jobs",
+    handler: "translate.listJobs",
+    config: { policies: authedOnly() },
+  },
+  {
+    method: "GET",
     path: "/jobs/:id",
     handler: "translate.getJob",
     config: { policies: authedOnly() },
@@ -151,5 +157,23 @@ module.exports = [
     path: "/cache",
     handler: "translate.clearCache",
     config: { policies: settingsPermissions() },
+  },
+  {
+    method: "POST",
+    path: "/content/locale-status",
+    handler: "translate.localeStatus",
+    config: { policies: contentReadPermissions() },
+  },
+  {
+    method: "GET",
+    path: "/content-types",
+    handler: "translate.contentTypes",
+    config: { policies: authedOnly() },
+  },
+  {
+    method: "POST",
+    path: "/content/list",
+    handler: "translate.contentList",
+    config: { policies: contentReadPermissions() },
   },
 ];

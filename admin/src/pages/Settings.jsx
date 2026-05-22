@@ -11,7 +11,7 @@
 // Save semantics: edits stay in local state until the user clicks Save.
 // Reset reloads the defaults from config/plugins.js + glossary.json.
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import {
   useFetchClient,
@@ -32,8 +32,37 @@ import {
   TextInput,
   Typography,
 } from "@strapi/design-system";
-import { ArrowClockwise, Check, Cross, Plus, Trash } from "@strapi/icons";
+import {
+  ArrowClockwise,
+  Check,
+  Cross,
+  Download,
+  Plus,
+  Trash,
+  Upload,
+} from "@strapi/icons";
 import pluginId from "../pluginId";
+
+// Convert a millisecond timestamp into a human-readable "X minutes ago" string.
+// Cheap and i18n-naive — fine for an admin diagnostics panel where the value
+// rarely needs to be precise.
+const timeAgo = (ts) => {
+  if (!ts) return null;
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return "just now";
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+};
+
+const formatNumber = (n) => {
+  if (typeof n !== "number" || !isFinite(n)) return "—";
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+};
 
 const tid = (key) => `${pluginId}.${key}`;
 
@@ -44,7 +73,7 @@ const emptySettings = () => ({
 
 const SettingsPage = () => {
   const { formatMessage } = useIntl();
-  const { get, put, post } = useFetchClient();
+  const { get, put, post, del } = useFetchClient();
   const { toggleNotification } = useNotification();
 
   const [loading, setLoading] = useState(true);
@@ -56,6 +85,15 @@ const SettingsPage = () => {
   const [newPreserveTerm, setNewPreserveTerm] = useState("");
   const [newSource, setNewSource] = useState("");
   const [newTarget, setNewTarget] = useState("");
+
+  // Diagnostics state — cache stats + provider credit usage.
+  const [cacheStats, setCacheStats] = useState(null);
+  const [usage, setUsage] = useState(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [clearingCache, setClearingCache] = useState(false);
+
+  // Hidden file input ref for glossary import.
+  const importInputRef = useRef(null);
 
   // Initial load. The server returns settings pre-merged with defaults so the
   // form always has something sensible on first render.
@@ -256,6 +294,133 @@ const SettingsPage = () => {
     }
   };
 
+  // Diagnostics: fetch cache stats + provider usage in parallel.
+  const refreshDiagnostics = async () => {
+    setDiagLoading(true);
+    const [statsRes, usageRes] = await Promise.allSettled([
+      get("/translate/cache/stats"),
+      get("/translate/usage"),
+    ]);
+    if (statsRes.status === "fulfilled") setCacheStats(statsRes.value.data);
+    else setCacheStats(null);
+    if (usageRes.status === "fulfilled") setUsage(usageRes.value.data);
+    else setUsage(null);
+    setDiagLoading(false);
+  };
+
+  // Refresh diagnostics on initial settings load.
+  useEffect(() => {
+    if (!loading) refreshDiagnostics();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
+  const handleClearCache = async () => {
+    setClearingCache(true);
+    try {
+      const res = await del("/translate/cache");
+      toggleNotification({
+        type: "success",
+        message: formatMessage(
+          {
+            id: tid("settings.toast.cacheCleared"),
+            defaultMessage:
+              "Cleared {count} cached translation(s).",
+          },
+          { count: res.data?.cleared || 0 }
+        ),
+      });
+      await refreshDiagnostics();
+    } catch (err) {
+      toggleNotification({
+        type: "danger",
+        message: formatMessage(
+          {
+            id: tid("settings.toast.cacheClearFailed"),
+            defaultMessage: "Failed to clear cache: {error}",
+          },
+          { error: err?.message || "Unknown error" }
+        ),
+      });
+    } finally {
+      setClearingCache(false);
+    }
+  };
+
+  // Glossary export: dump the current in-memory values, not the saved store
+  // copy — gives the editor what they see, including unsaved edits.
+  const handleExportGlossary = () => {
+    const payload = {
+      preserveExact: values.glossary.preserveExact,
+      perLocale: values.glossary.perLocale,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `glossary-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Glossary import: validate the JSON shape before merging into local state.
+  // Doesn't auto-save — the editor still has to click Save.
+  const handleImportGlossary = async (file) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const preserveExact = Array.isArray(parsed.preserveExact)
+        ? parsed.preserveExact.filter((s) => typeof s === "string" && s.trim())
+        : [];
+      const perLocale =
+        parsed.perLocale && typeof parsed.perLocale === "object"
+          ? Object.fromEntries(
+              Object.entries(parsed.perLocale)
+                .filter(([code]) => supportedLocales.includes(code))
+                .map(([code, mappings]) => [
+                  code,
+                  Object.fromEntries(
+                    Object.entries(mappings || {}).filter(
+                      ([s, t]) =>
+                        typeof s === "string" &&
+                        s.trim() &&
+                        typeof t === "string" &&
+                        t.trim()
+                    )
+                  ),
+                ])
+            )
+          : {};
+      setValues((v) => ({
+        ...v,
+        glossary: { preserveExact, perLocale },
+      }));
+      toggleNotification({
+        type: "success",
+        message: formatMessage({
+          id: tid("settings.toast.glossaryImported"),
+          defaultMessage:
+            "Glossary loaded into the form. Click Save to persist.",
+        }),
+      });
+    } catch (err) {
+      toggleNotification({
+        type: "danger",
+        message: formatMessage(
+          {
+            id: tid("settings.toast.glossaryImportFailed"),
+            defaultMessage: "Failed to import glossary: {error}",
+          },
+          { error: err?.message || "invalid JSON" }
+        ),
+      });
+    }
+  };
+
   if (loading) {
     return (
       <Page.Main>
@@ -318,6 +483,16 @@ const SettingsPage = () => {
       />
       <Layouts.Content>
         <Flex direction="column" alignItems="stretch" gap={6}>
+          <DiagnosticsCard
+            cacheStats={cacheStats}
+            usage={usage}
+            loading={diagLoading}
+            onRefresh={refreshDiagnostics}
+            onClearCache={handleClearCache}
+            clearingCache={clearingCache}
+            formatMessage={formatMessage}
+          />
+
           <SectionCard
             title={formatMessage({
               id: tid("settings.voice.title"),
@@ -437,6 +612,43 @@ const SettingsPage = () => {
               defaultMessage:
                 "When translating to the selected locale, the LLM is told to prefer the target term over a literal translation. Example: \"Motorhome Pitches\" → \"Private Campsites\" for English.",
             })}
+            actions={
+              <Flex gap={2}>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept="application/json"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleImportGlossary(file);
+                    e.target.value = "";
+                  }}
+                />
+                <Button
+                  variant="tertiary"
+                  size="S"
+                  startIcon={<Upload />}
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  {formatMessage({
+                    id: tid("settings.glossary.import"),
+                    defaultMessage: "Import",
+                  })}
+                </Button>
+                <Button
+                  variant="tertiary"
+                  size="S"
+                  startIcon={<Download />}
+                  onClick={handleExportGlossary}
+                >
+                  {formatMessage({
+                    id: tid("settings.glossary.export"),
+                    defaultMessage: "Export",
+                  })}
+                </Button>
+              </Flex>
+            }
           >
             <Flex direction="column" alignItems="stretch" gap={4}>
               <Box maxWidth="260px">
@@ -576,7 +788,7 @@ const SettingsPage = () => {
   );
 };
 
-const SectionCard = ({ title, description, children }) => (
+const SectionCard = ({ title, description, actions, children }) => (
   <Box
     background="neutral0"
     padding={6}
@@ -585,21 +797,202 @@ const SectionCard = ({ title, description, children }) => (
     borderColor="neutral150"
   >
     <Flex direction="column" alignItems="stretch" gap={4}>
-      <Box>
-        <Typography variant="delta" tag="h2">
-          {title}
-        </Typography>
-        {description && (
-          <Box paddingTop={1}>
-            <Typography variant="pi" textColor="neutral600">
-              {description}
-            </Typography>
-          </Box>
-        )}
-      </Box>
+      <Flex justifyContent="space-between" alignItems="flex-start" gap={3}>
+        <Box flex="1">
+          <Typography variant="delta" tag="h2">
+            {title}
+          </Typography>
+          {description && (
+            <Box paddingTop={1}>
+              <Typography variant="pi" textColor="neutral600">
+                {description}
+              </Typography>
+            </Box>
+          )}
+        </Box>
+        {actions}
+      </Flex>
       {children}
     </Flex>
   </Box>
 );
+
+const DiagnosticsCard = ({
+  cacheStats,
+  usage,
+  loading,
+  onRefresh,
+  onClearCache,
+  clearingCache,
+  formatMessage,
+}) => {
+  const usageRatio =
+    usage && typeof usage.limit === "number" && usage.limit > 0
+      ? Math.min(100, Math.round((usage.count / usage.limit) * 100))
+      : null;
+  return (
+    <SectionCard
+      title={formatMessage({
+        id: tid("settings.diagnostics.title"),
+        defaultMessage: "Diagnostics",
+      })}
+      description={formatMessage({
+        id: tid("settings.diagnostics.description"),
+        defaultMessage:
+          "Translation memory cache and provider credit usage. Refresh to read the live state.",
+      })}
+      actions={
+        <Button
+          variant="tertiary"
+          size="S"
+          startIcon={<ArrowClockwise />}
+          onClick={onRefresh}
+          loading={loading}
+          disabled={loading}
+        >
+          {formatMessage({
+            id: tid("settings.diagnostics.refresh"),
+            defaultMessage: "Refresh",
+          })}
+        </Button>
+      }
+    >
+      <Flex gap={4} wrap="wrap">
+        <Box
+          flex="1"
+          minWidth="240px"
+          padding={4}
+          background="neutral100"
+          hasRadius
+          borderColor="neutral200"
+          borderWidth="1px"
+          borderStyle="solid"
+        >
+          <Typography variant="sigma" textColor="neutral600">
+            {formatMessage({
+              id: tid("settings.diagnostics.cache"),
+              defaultMessage: "Translation cache",
+            })}
+          </Typography>
+          <Box paddingTop={2}>
+            <Typography variant="alpha" fontWeight="bold">
+              {cacheStats ? formatNumber(cacheStats.size) : "—"}
+            </Typography>
+            <Box paddingTop={1}>
+              <Typography variant="pi" textColor="neutral600">
+                {cacheStats && cacheStats.size > 0
+                  ? formatMessage(
+                      {
+                        id: tid("settings.diagnostics.cacheDetail"),
+                        defaultMessage:
+                          "{hits} hits · oldest {oldest}, newest {newest}",
+                      },
+                      {
+                        hits: formatNumber(cacheStats.totalHits || 0),
+                        oldest: timeAgo(cacheStats.oldest) || "—",
+                        newest: timeAgo(cacheStats.newest) || "—",
+                      }
+                    )
+                  : cacheStats && cacheStats.size === 0
+                  ? formatMessage({
+                      id: tid("settings.diagnostics.cacheEmpty"),
+                      defaultMessage: "No cached translations yet.",
+                    })
+                  : formatMessage({
+                      id: tid("settings.diagnostics.cacheUnknown"),
+                      defaultMessage: "Refresh to load.",
+                    })}
+              </Typography>
+            </Box>
+            {cacheStats && cacheStats.enabled === false && (
+              <Box paddingTop={1}>
+                <Typography variant="pi" textColor="warning700">
+                  {formatMessage({
+                    id: tid("settings.diagnostics.cacheDisabled"),
+                    defaultMessage:
+                      "Cache is disabled in plugin config (cache.enabled: false).",
+                  })}
+                </Typography>
+              </Box>
+            )}
+          </Box>
+          <Box paddingTop={3}>
+            <Button
+              variant="danger-light"
+              size="S"
+              startIcon={<Trash />}
+              onClick={onClearCache}
+              loading={clearingCache}
+              disabled={clearingCache || !cacheStats || cacheStats.size === 0}
+            >
+              {formatMessage({
+                id: tid("settings.diagnostics.clearCache"),
+                defaultMessage: "Clear cache",
+              })}
+            </Button>
+          </Box>
+        </Box>
+
+        <Box
+          flex="1"
+          minWidth="240px"
+          padding={4}
+          background="neutral100"
+          hasRadius
+          borderColor="neutral200"
+          borderWidth="1px"
+          borderStyle="solid"
+        >
+          <Typography variant="sigma" textColor="neutral600">
+            {formatMessage({
+              id: tid("settings.diagnostics.usage"),
+              defaultMessage: "Provider credit usage",
+            })}
+          </Typography>
+          <Box paddingTop={2}>
+            <Typography variant="alpha" fontWeight="bold">
+              {usage
+                ? `$${(usage.count || 0).toFixed(2)}`
+                : "—"}
+            </Typography>
+            <Box paddingTop={1}>
+              <Typography variant="pi" textColor="neutral600">
+                {usage && typeof usage.limit === "number" && usage.limit > 0
+                  ? formatMessage(
+                      {
+                        id: tid("settings.diagnostics.usageOfLimit"),
+                        defaultMessage:
+                          "used of ${limit} ({pct}%)",
+                      },
+                      {
+                        limit: usage.limit.toFixed(2),
+                        pct: usageRatio,
+                      }
+                    )
+                  : usage
+                  ? formatMessage({
+                      id: tid("settings.diagnostics.usageNoLimit"),
+                      defaultMessage:
+                        "used. No credit limit configured.",
+                    })
+                  : formatMessage({
+                      id: tid("settings.diagnostics.usageUnknown"),
+                      defaultMessage: "Refresh to load.",
+                    })}
+              </Typography>
+            </Box>
+            {usage?.error && (
+              <Box paddingTop={1}>
+                <Typography variant="pi" textColor="danger600">
+                  {usage.error}
+                </Typography>
+              </Box>
+            )}
+          </Box>
+        </Box>
+      </Flex>
+    </SectionCard>
+  );
+};
 
 export default SettingsPage;
