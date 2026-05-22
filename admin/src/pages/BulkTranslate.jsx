@@ -639,7 +639,6 @@ const BulkTranslatePage = () => {
           )}
         </Flex>
       </Layouts.Content>
-      <Layouts.Footer />
       <Box
         background="neutral0"
         padding={4}
