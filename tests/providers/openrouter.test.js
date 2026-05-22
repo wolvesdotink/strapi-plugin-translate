@@ -234,6 +234,49 @@ describe("openrouter provider", () => {
     expect(fake.calls).toHaveLength(0);
   });
 
+  it("retries with corrective feedback when HTML structure is wrong", async () => {
+    const sourceHtml =
+      "<p><strong>a</strong> <strong>b</strong> <strong>c</strong> <strong>d</strong></p>";
+    const badHtml = "<p><strong>a</strong> <strong>b</strong> c d</p>";
+    const goodHtml =
+      "<p><strong>A</strong> <strong>B</strong> <strong>C</strong> <strong>D</strong></p>";
+
+    let n = 0;
+    const fake = makeFakeClient({
+      respond: async () => {
+        n += 1;
+        if (n === 1) return okResp([badHtml]);
+        return okResp([goodHtml]);
+      },
+    });
+    const provider = openrouter.init({
+      providerOptions: baseOpts,
+      clientFactory: fake.factory,
+    });
+
+    const out = await provider.translate({
+      text: [sourceHtml],
+      sourceLocale: "de",
+      targetLocale: "en",
+      format: "html",
+    });
+
+    expect(out).toEqual([goodHtml]);
+    expect(fake.calls).toHaveLength(2);
+
+    // First attempt: just system + user.
+    expect(fake.calls[0].body.messages).toHaveLength(2);
+
+    // Second attempt: system + user + assistant (the failed echo) + user (corrective prompt).
+    const retryMsgs = fake.calls[1].body.messages;
+    expect(retryMsgs).toHaveLength(4);
+    expect(retryMsgs[2].role).toBe("assistant");
+    expect(retryMsgs[2].content).toContain(badHtml);
+    expect(retryMsgs[3].role).toBe("user");
+    expect(retryMsgs[3].content).toMatch(/missing 2 <strong>/i);
+    expect(retryMsgs[3].content).toMatch(/item 0/i);
+  }, 15_000);
+
   it("rejects length mismatch as a terminal-or-retriable failure", async () => {
     // Length mismatch is retriable (not marked terminal). It will retry 3
     // times and then throw the last error. Test verifies the eventual error.

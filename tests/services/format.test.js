@@ -59,6 +59,41 @@ describe("format service", () => {
     });
   });
 
+  describe("describeHtmlMismatch", () => {
+    it("returns null on identical shapes", () => {
+      const a = '<p>Hallo <a href="https://example.com">Welt</a></p>';
+      const b = '<p>Hello <a href="https://example.com">world</a></p>';
+      expect(svc.describeHtmlMismatch(a, b)).toBeNull();
+    });
+
+    it("summarises a missing-strong case", () => {
+      const a = "<p><strong>a</strong> <strong>b</strong> <strong>c</strong> <strong>d</strong></p>";
+      const b = "<p><strong>a</strong> <strong>b</strong> c d</p>";
+      const r = svc.describeHtmlMismatch(a, b);
+      expect(r).not.toBeNull();
+      expect(r.missingTags).toEqual({ STRONG: 2 });
+      expect(r.extraTags).toEqual({});
+      expect(r.missingUrls).toEqual([]);
+      expect(r.extraUrls).toEqual([]);
+      expect(r.summary).toMatch(/missing 2 <strong> tag/i);
+    });
+
+    it("summarises a mixed case (missing + extra tags + URL diffs)", () => {
+      const a = '<p><strong>x</strong> <a href="/a">l</a></p>';
+      const b = '<p><em>x</em> <a href="/b">l</a></p>';
+      const r = svc.describeHtmlMismatch(a, b);
+      expect(r).not.toBeNull();
+      expect(r.missingTags).toEqual({ STRONG: 1 });
+      expect(r.extraTags).toEqual({ EM: 1 });
+      expect(r.missingUrls).toEqual(["/a"]);
+      expect(r.extraUrls).toEqual(["/b"]);
+      expect(r.summary).toMatch(/missing 1 <strong>/i);
+      expect(r.summary).toMatch(/extra 1 <em>/i);
+      expect(r.summary).toMatch(/missing URL "\/a"/);
+      expect(r.summary).toMatch(/extra URL "\/b"/);
+    });
+  });
+
   describe("collectBlocksTexts / applyBlocksTexts", () => {
     it("collects leaf text nodes in order", () => {
       const blocks = [

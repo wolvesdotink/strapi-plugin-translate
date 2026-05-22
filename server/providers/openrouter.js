@@ -24,12 +24,18 @@ const MAX_ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 90_000;
 
 /**
- * Provider errors carry two custom flags that the orchestrator's retry loop
+ * Provider errors carry custom flags that the orchestrator's retry loop
  * inspects. `terminal: true` means "don't retry — the cause is permanent
  * (truncation, refusal, content filter)". `response` carries the upstream
- * response for diagnostic logging.
+ * response for diagnostic logging. `htmlMismatch` is set when validation
+ * detects an HTML structure failure; the retry loop reads it to replay the
+ * request with corrective feedback.
  *
- * @typedef {Error & { terminal?: boolean, response?: any }} ProviderError
+ * @typedef {Error & {
+ *   terminal?: boolean,
+ *   response?: any,
+ *   htmlMismatch?: { rawAssistantContent: string, failures: Array<{ index: number, mismatch: any }> },
+ * }} ProviderError
  */
 
 const makeAbortError = () => {
@@ -148,7 +154,7 @@ const resolveFormatService = () => {
   return formatFactory();
 };
 
-const validateShape = (input, output, format) => {
+const validateShape = (input, output, format, rawAssistantContent) => {
   if (!Array.isArray(output)) {
     throw new Error("translation output is not an array");
   }
@@ -159,13 +165,37 @@ const validateShape = (input, output, format) => {
   }
   if (format === "html") {
     const fmt = resolveFormatService();
+    const failures = [];
     for (let i = 0; i < input.length; i++) {
-      const res = fmt.validateHtmlShape(input[i], output[i]);
-      if (!res.ok) {
-        throw new Error(`HTML structure mismatch on item ${i}: ${res.reason}`);
-      }
+      const mismatch = fmt.describeHtmlMismatch(input[i], output[i]);
+      if (mismatch) failures.push({ index: i, mismatch });
+    }
+    if (failures.length > 0) {
+      const summary = failures
+        .map((f) => `item ${f.index}: ${f.mismatch.summary}`)
+        .join("; ");
+      /** @type {ProviderError} */
+      const e = new Error(`HTML structure mismatch — ${summary}`);
+      // Attach the raw model output + structured failure detail so the retry
+      // loop can replay the request with corrective feedback.
+      e.htmlMismatch = { rawAssistantContent, failures };
+      throw e;
     }
   }
+};
+
+const buildCorrectionPrompt = (failures) => {
+  const lines = failures
+    .map((f) => `- Item ${f.index}: ${f.mismatch.summary}`)
+    .join("\n");
+  return [
+    "Your previous response had HTML structure issues that must be fixed:",
+    lines,
+    "",
+    "Re-emit the full translations array in the same order and length.",
+    "Translate every text node, but preserve every tag from the source EXACTLY —",
+    "do not merge, drop, or rename any <strong>, <em>, <a>, or other inline tag.",
+  ].join("\n");
 };
 
 const init = ({ providerOptions, clientFactory }) => {
@@ -221,35 +251,52 @@ const init = ({ providerOptions, clientFactory }) => {
         glossary,
       });
 
-      const requestBody = {
-        model,
-        // OpenRouter built-in model fallback. If `model` is unavailable
-        // OpenRouter will try the next entry. We always include the primary first.
-        models: [model, ...fallbackModels].filter(Boolean),
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "translation_batch",
-            strict: true,
-            schema: {
-              type: "object",
-              properties: {
-                translations: {
-                  type: "array",
-                  items: { type: "string" },
-                },
-              },
-              required: ["translations"],
-              additionalProperties: false,
-            },
-          },
-        },
-        messages: [
+      // Build the request body fresh per attempt so we can append corrective
+      // messages on retry when the previous attempt's HTML structure failed
+      // validation. `corrections` carries the failed assistant content + the
+      // structured per-item failure detail produced by validateShape.
+      const buildRequest = (corrections) => {
+        const messages = [
           { role: "system", content: systemPrompt },
           { role: "user", content: JSON.stringify({ inputs: text }) },
-        ],
-        max_tokens: maxOutputTokens,
-        temperature: 0.3,
+        ];
+        if (corrections) {
+          messages.push({
+            role: "assistant",
+            content: corrections.rawAssistantContent,
+          });
+          messages.push({
+            role: "user",
+            content: buildCorrectionPrompt(corrections.failures),
+          });
+        }
+        return {
+          model,
+          // OpenRouter built-in model fallback. If `model` is unavailable
+          // OpenRouter will try the next entry. We always include the primary first.
+          models: [model, ...fallbackModels].filter(Boolean),
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "translation_batch",
+              strict: true,
+              schema: {
+                type: "object",
+                properties: {
+                  translations: {
+                    type: "array",
+                    items: { type: "string" },
+                  },
+                },
+                required: ["translations"],
+                additionalProperties: false,
+              },
+            },
+          },
+          messages,
+          max_tokens: maxOutputTokens,
+          temperature: 0.3,
+        };
       };
 
       const totalChars = text.reduce((a, s) => a + (s || "").length, 0);
@@ -265,9 +312,10 @@ const init = ({ providerOptions, clientFactory }) => {
         );
       };
 
-      const attemptOnce = async () => {
+      const attemptOnce = async (corrections) => {
         if (signal?.aborted) throw makeAbortError();
 
+        const requestBody = buildRequest(corrections);
         const response = await client.chat.completions.create(
           requestBody,
           signal ? { signal } : undefined
@@ -334,15 +382,19 @@ const init = ({ providerOptions, clientFactory }) => {
           throw e;
         }
 
-        validateShape(text, parsed.translations, format);
+        validateShape(text, parsed.translations, format, content);
         return parsed.translations;
       };
 
       let lastError;
+      // When the previous attempt's HTML output failed validation, carry the
+      // failure detail forward so the next attempt sees its own bad output +
+      // a corrective user message.
+      let corrections;
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         if (signal?.aborted) throw makeAbortError();
         try {
-          return await attemptOnce();
+          return await attemptOnce(corrections);
         } catch (err) {
           // Distinguish abort from translation failure.
           if (err?.name === "AbortError" || signal?.aborted) {
@@ -352,6 +404,7 @@ const init = ({ providerOptions, clientFactory }) => {
           if (err?.terminal) throw err;
           lastError = err;
           logRetry(attempt, err, err?.response);
+          corrections = err?.htmlMismatch || undefined;
           if (attempt < MAX_ATTEMPTS) {
             await sleepWithBackoff(attempt, signal);
           }
