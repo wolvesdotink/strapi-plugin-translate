@@ -1,0 +1,14 @@
+{
+  "_comment": "Terms in preserveExact are kept verbatim across all locales. Place names, brand terms, product names go here. perLocale provides per-target overrides for ambiguous phrases.",
+  "preserveExact": [],
+  "perLocale": {
+    "en": {},
+    "de": {},
+    "fr": {},
+    "es": {},
+    "it": {},
+    "nl": {},
+    "pt": {},
+    "da": {}
+  }
+}

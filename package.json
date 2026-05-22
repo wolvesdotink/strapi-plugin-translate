@@ -1,0 +1,53 @@
+{
+  "name": "strapi-plugin-translate",
+  "version": "0.1.0",
+  "description": "AI-powered translation of localized Strapi v5 entries via OpenRouter LLMs.",
+  "keywords": [
+    "strapi",
+    "plugin",
+    "strapi-plugin",
+    "translate",
+    "translation",
+    "i18n",
+    "localization",
+    "openrouter",
+    "llm",
+    "ai"
+  ],
+  "license": "MIT",
+  "main": "./strapi-server.js",
+  "files": [
+    "admin",
+    "server",
+    "config",
+    "strapi-admin.js",
+    "strapi-server.js"
+  ],
+  "scripts": {
+    "verify": "node -e \"require('./strapi-server.js'); console.log('plugin loads')\" && npm test",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "node-html-parser": "^7.0.0",
+    "openai": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  },
+  "peerDependencies": {
+    "@strapi/strapi": "^5.0.0"
+  },
+  "strapi": {
+    "name": "translate",
+    "kind": "plugin",
+    "displayName": "Translate",
+    "description": "AI-powered translation of localized entries via OpenRouter."
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
