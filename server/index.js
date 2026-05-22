@@ -21,6 +21,7 @@ const autoTranslateService = require("./services/auto-translate");
 const backTranslateService = require("./services/back-translate");
 
 const adminRoutes = require("./routes/admin");
+const policies = require("./policies");
 
 module.exports = {
   register,
@@ -29,6 +30,8 @@ module.exports = {
   controllers: {
     translate: translateController,
   },
+
+  policies,
 
   services: {
     translate: translateService,

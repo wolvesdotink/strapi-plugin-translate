@@ -12,11 +12,24 @@
 //   GET  /translate/jobs/:id         -> snapshot { state, progress, targets, ... }
 //   POST /translate/jobs/:id/cancel  -> 200 { ok: true } | 409 | 404
 
+const READ_ACTION = "plugin::content-manager.explorer.read";
+const UPDATE_ACTION = "plugin::content-manager.explorer.update";
+
 const emptyFormatProgress = () => ({
   plain: { done: 0, total: 0 },
   html: { done: 0, total: 0 },
   blocks: { done: 0, total: 0 },
 });
+
+// Check `actions` against the caller's admin ability for `uid`. Returns
+// true only if every action is granted. Used by the preview-by-id routes,
+// where the uid lives in the stored preview row rather than the request
+// body, so the route-level hasContentPermissions policy can't reach it.
+const userCanOnUid = (ctx, uid, actions) => {
+  const ability = ctx.state?.userAbility;
+  if (!ability || !uid) return false;
+  return actions.every((action) => ability.can(action, uid));
+};
 
 // Derive the overall job state from per-target states once the loop ends.
 // - all done                                  -> "done"
@@ -491,6 +504,9 @@ module.exports = ({ strapi }) => {
     async getPreview(ctx) {
       const row = await preview().get(ctx.params.id);
       if (!row) return ctx.notFound("preview not found");
+      if (!userCanOnUid(ctx, row.uid, [READ_ACTION])) {
+        return ctx.forbidden("missing permission for this content type");
+      }
       ctx.body = row;
     },
 
@@ -499,6 +515,11 @@ module.exports = ({ strapi }) => {
      * Commits the proposed payload.
      */
     async acceptPreview(ctx) {
+      const row = await preview().get(ctx.params.id);
+      if (!row) return ctx.notFound("preview not found");
+      if (!userCanOnUid(ctx, row.uid, [READ_ACTION, UPDATE_ACTION])) {
+        return ctx.forbidden("missing permission for this content type");
+      }
       const res = await preview().accept(ctx.params.id);
       if (!res.ok && res.reason === "not-found") return ctx.notFound("preview not found");
       ctx.body = res;
@@ -508,6 +529,11 @@ module.exports = ({ strapi }) => {
      * POST /translate/preview/:id/discard
      */
     async discardPreview(ctx) {
+      const row = await preview().get(ctx.params.id);
+      if (!row) return ctx.notFound("preview not found");
+      if (!userCanOnUid(ctx, row.uid, [READ_ACTION, UPDATE_ACTION])) {
+        return ctx.forbidden("missing permission for this content type");
+      }
       const res = await preview().discard(ctx.params.id);
       if (!res.ok && res.reason === "not-found") return ctx.notFound("preview not found");
       ctx.body = res;
