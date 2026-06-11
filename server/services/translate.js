@@ -1,5 +1,3 @@
-"use strict";
-
 /**
  * @typedef {object} RefRecord
  * @property {string} target  Strapi UID of the target table (e.g. "admin::user")
@@ -11,6 +9,7 @@
  * @typedef {object} TranslationItem
  * @property {string} text
  * @property {Array<string|number>} path
+ * @property {{ maxLength?: number, minLength?: number }} [constraints]
  *
  * @typedef {object} BlocksItem
  * @property {Array<string|number>} path
@@ -83,6 +82,64 @@ const set = (obj, path, value) => {
     cursor = cursor[key];
   }
   cursor[path[path.length - 1]] = value;
+};
+
+const getByPath = (obj, path) => {
+  let cursor = obj;
+  for (const seg of path) {
+    if (cursor == null) return undefined;
+    cursor = cursor[seg];
+  }
+  return cursor;
+};
+
+// Normalize a Strapi validation-error path into segments. Strapi formats
+// yup paths by splitting on "." only, so a single segment can still carry
+// bracket indices ("sections[0]"). Accepts both array and string forms.
+const parseErrorPath = (path) => {
+  const rawSegments = Array.isArray(path)
+    ? path
+    : String(path || "").split(".");
+  const out = [];
+  for (const raw of rawSegments) {
+    const str = String(raw);
+    const re = /([^[\]]+)|\[(\d+)\]/g;
+    let m;
+    while ((m = re.exec(str)) !== null) {
+      if (m[2] !== undefined) out.push(Number(m[2]));
+      else if (/^\d+$/.test(m[1])) out.push(Number(m[1]));
+      else out.push(m[1]);
+    }
+  }
+  return out;
+};
+
+// Pull per-field errors out of a Strapi ValidationError (the shape the
+// entity validator throws at upsert time: details.errors = [{ path,
+// message, name }]). Returns null when the error isn't a validation error
+// at all — the caller rethrows those untouched.
+const extractValidationFieldErrors = (err) => {
+  const looksLikeValidation =
+    err?.name === "ValidationError" ||
+    err?.name === "YupValidationError" ||
+    Array.isArray(err?.details?.errors);
+  if (!looksLikeValidation) return null;
+  const errors = Array.isArray(err?.details?.errors) ? err.details.errors : [];
+  return errors
+    .map((e) => ({
+      path: parseErrorPath(e.path),
+      message: e.message || "failed validation",
+    }))
+    .filter((e) => e.path.length > 0);
+};
+
+// Default yup maxLength messages read "<field> must be at most N characters".
+// Parsing the limit out lets the provider verify its rewrite actually fits
+// before we burn another upsert attempt. Custom messages simply skip the
+// client-side check — the retried save still validates server-side.
+const parseMaxLengthFromMessage = (message) => {
+  const m = /at most (\d+) characters/i.exec(message || "");
+  return m ? Number(m[1]) : undefined;
 };
 
 // Record a relation/media reference we plan to send to the upsert. Each ref
@@ -208,7 +265,7 @@ const walkAttribute = ({
       set(data, fullPath, value);
       return;
     }
-    bag.plain.push({ text: value, path: fullPath });
+    bag.plain.push({ text: value, path: fullPath, constraints: attrDescriptor.constraints });
     return;
   }
 
@@ -217,7 +274,7 @@ const walkAttribute = ({
       set(data, fullPath, value);
       return;
     }
-    bag.html.push({ text: value, path: fullPath });
+    bag.html.push({ text: value, path: fullPath, constraints: attrDescriptor.constraints });
     return;
   }
 
@@ -385,7 +442,7 @@ const applyTranslations = ({
   });
 };
 
-module.exports = ({ strapi }) => {
+export default ({ strapi }) => {
   const fields = () => strapi.plugin("translate").service("translatable-fields");
   const chunks = () => strapi.plugin("translate").service("chunks");
   const settingsService = () => strapi.plugin("translate").service("settings");
@@ -576,15 +633,15 @@ module.exports = ({ strapi }) => {
       // written back to the cache. Glossary fingerprint is baked into the
       // cache key so editing the glossary invalidates the relevant entries.
       const cache = cacheService();
-      const cacheKeyInputs = (text) =>
-        text.map((source) => ({
-          source,
-          sourceLocale,
-          targetLocale,
-          format: null, // filled in per-group
-          voice: userSettings.voice || "",
-          glossary: userSettings.glossary,
-        }));
+      const cacheKeyInput = (item, format) => ({
+        source: item.text,
+        sourceLocale,
+        targetLocale,
+        format,
+        voice: userSettings.voice || "",
+        glossary: userSettings.glossary,
+        constraints: item.constraints,
+      });
 
       const translateGroup = async (items, format) => {
         if (items.length === 0) {
@@ -594,7 +651,7 @@ module.exports = ({ strapi }) => {
         const sources = items.map((it) => it.text);
         // Lookup all sources in cache.
         const lookups = await cache.getMany(
-          cacheKeyInputs(sources).map((k) => ({ ...k, format }))
+          items.map((it) => cacheKeyInput(it, format))
         );
         const finalOut = new Array(sources.length);
         const missIdxs = [];
@@ -633,6 +690,13 @@ module.exports = ({ strapi }) => {
           groups,
           maxConcurrency,
           async (group, gi) => {
+            // Per-item schema constraints (e.g. title maxLength), aligned
+            // with `group`. The provider folds them into the prompt and
+            // re-asks with corrective feedback when the model overshoots.
+            const groupItems = groupOriginIdx[gi].map(
+              (missIdx) => items[missIdxs[missIdx]]
+            );
+            const groupConstraints = groupItems.map((it) => it.constraints);
             const out = await provFn.translate({
               text: group,
               sourceLocale,
@@ -641,19 +705,17 @@ module.exports = ({ strapi }) => {
               signal,
               voice: userSettings.voice,
               glossary: userSettings.glossary,
+              constraints: groupConstraints.some(Boolean)
+                ? groupConstraints
+                : undefined,
             });
             // Persist cache writes for this chunk.
             const writes = [];
             for (let i = 0; i < group.length; i++) {
               const originIdx = groupOriginIdx[gi][i];
-              const cacheKey = cache.keyFor({
-                source: group[i],
-                sourceLocale,
-                targetLocale,
-                format,
-                voice: userSettings.voice || "",
-                glossary: userSettings.glossary,
-              });
+              const cacheKey = cache.keyFor(
+                cacheKeyInput(groupItems[i], format)
+              );
               writes.push({ key: cacheKey, translation: out[i] });
               finalOut[missIdxs[originIdx]] = out[i];
             }
@@ -732,6 +794,12 @@ module.exports = ({ strapi }) => {
         documentId,
         targetLocale,
         _sanityPairs: sanityPairs,
+        // Paths whose values came from the LLM. The save-repair loop only
+        // rewrites these — copied/skipped fields are never AI-altered.
+        translatedPaths: [
+          ...bag.plain.map((it) => it.path.join(".")),
+          ...bag.html.map((it) => it.path.join(".")),
+        ],
       };
     },
 
@@ -763,7 +831,20 @@ module.exports = ({ strapi }) => {
           );
         }
       }
-      const entry = await this.commitPreview(computed);
+      const entry = await this.commitPreview(computed, {
+        signal: args?.signal,
+        onRepair: (repairs) => {
+          for (const r of repairs) {
+            warnings.push({
+              kind: "validation-repair",
+              path: r.path,
+              message: r.message,
+              before: r.before,
+              after: r.after,
+            });
+          }
+        },
+      });
       return { entry, warnings };
     },
 
@@ -799,6 +880,12 @@ module.exports = ({ strapi }) => {
      * Handles the create-via-update fallback Strapi v5 needs to assign a
      * locale to an existing document.
      *
+     * When the upsert fails Strapi's entity validation on a field the LLM
+     * translated (e.g. the target-language title outgrew the schema's
+     * maxLength), the exact validation messages are fed back to the
+     * provider (fixText) so it can regenerate the failing strings — same
+     * meaning, but satisfying the rule — and the save is retried.
+     *
      * @param {object} args
      * @param {string} args.uid
      * @param {string} args.documentId
@@ -808,6 +895,11 @@ module.exports = ({ strapi }) => {
      * @param {object} [args.modelAttrs]
      * @param {string|number} [args.resolvedActingUserId]
      * @param {string|number} [args.actingUserId]
+     * @param {string[]} [args.translatedPaths] dot-joined paths the LLM wrote;
+     *   when present, repair is restricted to these fields.
+     * @param {object} [opts]
+     * @param {AbortSignal} [opts.signal]
+     * @param {(repairs: Array<{path: string, message: string, before: string, after: string}>) => void} [opts.onRepair]
      */
     async commitPreview({
       uid,
@@ -818,7 +910,8 @@ module.exports = ({ strapi }) => {
       modelAttrs,
       resolvedActingUserId,
       actingUserId,
-    }) {
+      translatedPaths,
+    }, opts = {}) {
       const data = { ...(proposed || {}) };
       const resolvedAttrs = modelAttrs || strapi.getModel(uid)?.attributes || {};
       const resolvedStamping = stamping || { createdBy: !!actingUserId, updatedBy: !!actingUserId };
@@ -837,38 +930,117 @@ module.exports = ({ strapi }) => {
         if (resolvedStamping.updatedBy && resolvedUserId) {
           data.updatedBy = resolvedUserId;
         }
-        if (resolvedAttrs.strapi_assignee) {
-          data.strapi_assignee = null;
-        }
-        return strapi.documents(uid).update({
+      } else {
+        // CREATE-via-UPDATE: stamp creator + updater, clear assignee.
+        //
+        // Strapi v5's `documents().create({ documentId, ... })` silently
+        // discards the `documentId` parameter and inserts a fresh document
+        // (see node_modules/@strapi/core/.../repository.mjs `create()` — it
+        // destructures documentId out of opts and never passes it through).
+        //
+        // The canonical "add a new locale to an existing document" pattern is
+        // `update()`. When no entry exists for (documentId, locale), the
+        // update() implementation falls through to copyNonLocalizedFields()
+        // + entries.create() with the original documentId preserved, which
+        // is exactly what we want.
+        if (resolvedStamping.createdBy && resolvedUserId) data.createdBy = resolvedUserId;
+        if (resolvedStamping.updatedBy && resolvedUserId) data.updatedBy = resolvedUserId;
+      }
+      if (resolvedAttrs.strapi_assignee) {
+        data.strapi_assignee = null;
+      }
+
+      const upsert = () =>
+        strapi.documents(uid).update({
           documentId,
           locale: targetLocale,
           data,
         });
-      }
 
-      // CREATE-via-UPDATE: stamp creator + updater, clear assignee.
-      //
-      // Strapi v5's `documents().create({ documentId, ... })` silently
-      // discards the `documentId` parameter and inserts a fresh document
-      // (see node_modules/@strapi/core/.../repository.mjs `create()` — it
-      // destructures documentId out of opts and never passes it through).
-      //
-      // The canonical "add a new locale to an existing document" pattern is
-      // `update()`. When no entry exists for (documentId, locale), the
-      // update() implementation falls through to copyNonLocalizedFields()
-      // + entries.create() with the original documentId preserved, which
-      // is exactly what we want.
-      if (resolvedStamping.createdBy && resolvedUserId) data.createdBy = resolvedUserId;
-      if (resolvedStamping.updatedBy && resolvedUserId) data.updatedBy = resolvedUserId;
-      if (resolvedAttrs.strapi_assignee) {
-        data.strapi_assignee = null;
+      // Save-repair loop. When the entity validator rejects a field the LLM
+      // wrote (length limits, regex, uniqueness, …), hand the failing texts
+      // plus the exact validation messages back to the provider so it can
+      // regenerate them (e.g. a shorter title with the same meaning), then
+      // retry the save. Two repair rounds, then the original error surfaces.
+      const MAX_REPAIR_ROUNDS = 2;
+      const repairablePathSet = Array.isArray(translatedPaths)
+        ? new Set(translatedPaths)
+        : null;
+
+      for (let round = 0; ; round++) {
+        try {
+          return await upsert();
+        } catch (err) {
+          const fieldErrors = extractValidationFieldErrors(err);
+          // Not a validation error, no per-field detail, or out of rounds:
+          // nothing the AI can do — surface the original error.
+          if (!fieldErrors || fieldErrors.length === 0 || round >= MAX_REPAIR_ROUNDS) {
+            throw err;
+          }
+
+          const provFn = strapi.plugin("translate").provider;
+          if (typeof provFn?.fixText !== "function") throw err;
+
+          const repairable = [];
+          for (const fe of fieldErrors) {
+            const joined = fe.path.join(".");
+            // Only rewrite values the LLM produced — never copied fields.
+            // (translatedPaths is absent for previews stored before this
+            // feature; fall back to "any non-empty string" there.)
+            if (repairablePathSet && !repairablePathSet.has(joined)) continue;
+            const value = getByPath(data, fe.path);
+            if (typeof value !== "string" || value.trim().length === 0) continue;
+            repairable.push({
+              path: fe.path,
+              joined,
+              message: fe.message,
+              text: value,
+            });
+          }
+          if (repairable.length === 0) throw err;
+
+          strapi.log.warn(
+            `[translate] upsert failed validation on ${repairable
+              .map((r) => `${r.joined} (${r.message})`)
+              .join("; ")} — asking provider to regenerate (round ${round + 1}/${MAX_REPAIR_ROUNDS})`
+          );
+
+          const userSettings = await settingsService().get();
+          const fixed = await provFn.fixText({
+            items: repairable.map((r) => ({
+              text: r.text,
+              issue: r.message,
+              maxLength: parseMaxLengthFromMessage(r.message),
+            })),
+            targetLocale,
+            voice: userSettings.voice,
+            signal: opts.signal,
+          });
+
+          const repairs = [];
+          repairable.forEach((r, i) => {
+            if (typeof fixed[i] === "string" && fixed[i] !== r.text) {
+              set(data, r.path, fixed[i]);
+              repairs.push({
+                path: r.joined,
+                message: r.message,
+                before: r.text,
+                after: fixed[i],
+              });
+            }
+          });
+          // Provider returned every text unchanged — retrying the same
+          // payload can only fail the same way.
+          if (repairs.length === 0) throw err;
+          if (typeof opts.onRepair === "function") {
+            try {
+              opts.onRepair(repairs);
+            } catch {
+              // never let a reporting hook break the save
+            }
+          }
+        }
       }
-      return strapi.documents(uid).update({
-        documentId,
-        locale: targetLocale,
-        data,
-      });
     },
 
     // Light helper for the controller — returns plugin usage from the provider
@@ -977,13 +1149,14 @@ module.exports = ({ strapi }) => {
           if (items.length === 0) return;
           const sources = items.map((it) => it.text);
           const lookups = await cache.getMany(
-            sources.map((s) => ({
-              source: s,
+            items.map((it) => ({
+              source: it.text,
               sourceLocale: src,
               targetLocale: target,
               format,
               voice: userSettings.voice || "",
               glossary: userSettings.glossary,
+              constraints: it.constraints,
             }))
           );
           for (let i = 0; i < lookups.length; i++) {

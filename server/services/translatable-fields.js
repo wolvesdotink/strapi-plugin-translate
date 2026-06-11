@@ -1,5 +1,3 @@
-"use strict";
-
 // Walks Strapi schemas and returns a flat list describing every field's
 // translation directive. Handles both annotation styles seen in this project:
 //   modern: pluginOptions.translate.translate
@@ -27,6 +25,7 @@
  * @property {string[]} [components]
  * @property {string} [relation]
  * @property {string} [target]
+ * @property {{ maxLength?: number, minLength?: number }} [constraints]
  */
 
 const SCALAR_TYPES = new Set([
@@ -63,6 +62,16 @@ const formatFor = (type) => {
   if (type === "richtext") return "html";
   if (type === "blocks") return "blocks";
   return "plain";
+};
+
+// Schema-level length limits the LLM must respect. A translation that grows
+// past maxLength fails Strapi's entity validator at upsert time, so we feed
+// the limit into the prompt up front instead of burning a failed save.
+const constraintsFor = (attr) => {
+  const constraints = {};
+  if (typeof attr.maxLength === "number") constraints.maxLength = attr.maxLength;
+  if (typeof attr.minLength === "number") constraints.minLength = attr.minLength;
+  return Object.keys(constraints).length > 0 ? constraints : undefined;
 };
 
 // For a content type or component schema, return per-attribute records.
@@ -138,6 +147,7 @@ const describeAttributes = (schema) => {
         type,
         directive: isTranslatable ? directive : "copy",
         format: formatFor(type),
+        constraints: isTranslatable ? constraintsFor(attr) : undefined,
       });
       continue;
     }
@@ -148,7 +158,7 @@ const describeAttributes = (schema) => {
   return out;
 };
 
-module.exports = ({ strapi }) => ({
+export default ({ strapi }) => ({
   /**
    * Return the field map for a content type or component UID.
    * Includes the strapi schema reference for downstream lookups.

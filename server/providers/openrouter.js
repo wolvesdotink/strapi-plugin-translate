@@ -1,5 +1,3 @@
-"use strict";
-
 // OpenRouter provider for the translate plugin.
 //
 // OpenRouter exposes an OpenAI-compatible Chat Completions API at
@@ -16,7 +14,9 @@
 
 // openai v4 supports both `require("openai")` and `require("openai").OpenAI`.
 // We use the named export so tests can mock cleanly via `vi.mock("openai", ...)`.
-const { OpenAI } = require("openai");
+import { OpenAI } from "openai";
+
+import formatFactory from "../services/format";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
@@ -27,14 +27,17 @@ const REQUEST_TIMEOUT_MS = 90_000;
  * Provider errors carry custom flags that the orchestrator's retry loop
  * inspects. `terminal: true` means "don't retry — the cause is permanent
  * (truncation, refusal, content filter)". `response` carries the upstream
- * response for diagnostic logging. `htmlMismatch` is set when validation
- * detects an HTML structure failure; the retry loop reads it to replay the
- * request with corrective feedback.
+ * response for diagnostic logging. `correctable` is set when output
+ * validation fails in a way the model can fix (HTML structure mismatch,
+ * length-constraint violation); the retry loop reads it to replay the
+ * request with the failed output + corrective feedback appended.
+ *
+ * @typedef {{ index: number, kind: "html" | "length", summary: string }} CorrectableFailure
  *
  * @typedef {Error & {
  *   terminal?: boolean,
  *   response?: any,
- *   htmlMismatch?: { rawAssistantContent: string, failures: Array<{ index: number, mismatch: any }> },
+ *   correctable?: { rawAssistantContent: string, failures: CorrectableFailure[] },
  * }} ProviderError
  */
 
@@ -68,12 +71,34 @@ const getLogger = () =>
     error: (...args) => console.error(...args),
   };
 
+// Per-item schema length limits (Strapi attribute minLength/maxLength),
+// rendered into the prompt so the model rephrases to fit instead of
+// producing a translation the CMS will reject at save time.
+const buildConstraintsBlock = (constraints) => {
+  if (!Array.isArray(constraints)) return "";
+  const lines = [];
+  constraints.forEach((c, i) => {
+    if (!c) return;
+    const parts = [];
+    if (typeof c.maxLength === "number") parts.push(`at most ${c.maxLength} characters`);
+    if (typeof c.minLength === "number") parts.push(`at least ${c.minLength} characters`);
+    if (parts.length > 0) lines.push(`- inputs[${i}] must be ${parts.join(" and ")}`);
+  });
+  if (lines.length === 0) return "";
+  return [
+    "\nLength constraints (hard limits enforced by the CMS — count characters, not words):",
+    ...lines,
+    "If a literal translation would break a limit, rephrase with shorter synonyms or drop non-essential words while keeping the meaning. Never truncate mid-word or cut information arbitrarily.",
+  ].join("\n");
+};
+
 const buildSystemPrompt = ({
   sourceLocale,
   targetLocale,
   format,
   voice,
   glossary,
+  constraints,
 }) => {
   const preserveList = (glossary && glossary.preserveExact) || [];
   const perLocaleMap =
@@ -130,6 +155,7 @@ const buildSystemPrompt = ({
     "- Do NOT add explanations, prefixes, suffixes, or wrap output in code fences.",
     preserveBlock,
     perLocaleBlock,
+    buildConstraintsBlock(constraints),
   ]
     .filter(Boolean)
     .join("\n");
@@ -150,11 +176,36 @@ const resolveFormatService = () => {
   }
   // Local fallback used in tests and at register-time before services
   // are mounted. Re-uses the same module as the wired service.
-  const formatFactory = require("../services/format");
   return formatFactory();
 };
 
-const validateShape = (input, output, format, rawAssistantContent) => {
+// Per-item length-constraint check, used by both translate() and fixText().
+// Returns CorrectableFailure entries for the corrective retry loop.
+const describeLengthFailures = (output, constraints) => {
+  if (!Array.isArray(constraints)) return [];
+  const failures = [];
+  for (let i = 0; i < output.length; i++) {
+    const c = constraints[i];
+    if (!c || typeof output[i] !== "string") continue;
+    const len = output[i].length;
+    if (typeof c.maxLength === "number" && len > c.maxLength) {
+      failures.push({
+        index: i,
+        kind: "length",
+        summary: `is ${len} characters but must be at most ${c.maxLength} — rephrase it shorter while keeping the meaning`,
+      });
+    } else if (typeof c.minLength === "number" && len < c.minLength) {
+      failures.push({
+        index: i,
+        kind: "length",
+        summary: `is ${len} characters but must be at least ${c.minLength}`,
+      });
+    }
+  }
+  return failures;
+};
+
+const validateShape = (input, output, format, rawAssistantContent, constraints) => {
   if (!Array.isArray(output)) {
     throw new Error("translation output is not an array");
   }
@@ -163,39 +214,120 @@ const validateShape = (input, output, format, rawAssistantContent) => {
       `translation length mismatch: expected ${input.length}, got ${output.length}`
     );
   }
+  const failures = [];
   if (format === "html") {
     const fmt = resolveFormatService();
-    const failures = [];
     for (let i = 0; i < input.length; i++) {
       const mismatch = fmt.describeHtmlMismatch(input[i], output[i]);
-      if (mismatch) failures.push({ index: i, mismatch });
+      if (mismatch) failures.push({ index: i, kind: "html", summary: mismatch.summary });
     }
-    if (failures.length > 0) {
-      const summary = failures
-        .map((f) => `item ${f.index}: ${f.mismatch.summary}`)
-        .join("; ");
-      /** @type {ProviderError} */
-      const e = new Error(`HTML structure mismatch — ${summary}`);
-      // Attach the raw model output + structured failure detail so the retry
-      // loop can replay the request with corrective feedback.
-      e.htmlMismatch = { rawAssistantContent, failures };
-      throw e;
-    }
+  }
+  failures.push(...describeLengthFailures(output, constraints));
+  if (failures.length > 0) {
+    const summary = failures
+      .map((f) => `item ${f.index}: ${f.summary}`)
+      .join("; ");
+    /** @type {ProviderError} */
+    const e = new Error(`translation validation failed — ${summary}`);
+    // Attach the raw model output + structured failure detail so the retry
+    // loop can replay the request with corrective feedback.
+    e.correctable = { rawAssistantContent, failures };
+    throw e;
   }
 };
 
 const buildCorrectionPrompt = (failures) => {
   const lines = failures
-    .map((f) => `- Item ${f.index}: ${f.mismatch.summary}`)
+    .map((f) => `- Item ${f.index}: ${f.summary}`)
     .join("\n");
+  const guidance = [];
+  if (failures.some((f) => f.kind === "html")) {
+    guidance.push(
+      "Translate every text node, but preserve every tag from the source EXACTLY —",
+      "do not merge, drop, or rename any <strong>, <em>, <a>, or other inline tag."
+    );
+  }
+  if (failures.some((f) => f.kind === "length")) {
+    guidance.push(
+      "Where a length limit is violated, rewrite with shorter synonyms or drop",
+      "non-essential words so the text fits — never truncate mid-word or cut meaning."
+    );
+  }
   return [
-    "Your previous response had HTML structure issues that must be fixed:",
+    "Your previous response had issues that must be fixed:",
     lines,
     "",
-    "Re-emit the full translations array in the same order and length.",
-    "Translate every text node, but preserve every tag from the source EXACTLY —",
-    "do not merge, drop, or rename any <strong>, <em>, <a>, or other inline tag.",
+    "Re-emit the full translations array in the same order and length,",
+    "keeping items that had no issue unchanged.",
+    ...guidance,
   ].join("\n");
+};
+
+// Shared response unwrapping for translate() and fixText(): surfaces
+// OpenRouter routing errors and cause-specific terminal failures, returns
+// the raw assistant content string otherwise.
+const extractContent = (response) => {
+  // OpenRouter routing error shape: `error` field on the response body.
+  if (response?.error) {
+    const msg = response.error.message || JSON.stringify(response.error);
+    /** @type {ProviderError} */
+    const e = new Error(`[translate] OpenRouter error: ${msg}`);
+    e.terminal = true;
+    throw e;
+  }
+
+  const choice = response?.choices?.[0];
+  const finishReason = choice?.finish_reason;
+  const refusal = choice?.message?.refusal;
+  const content = choice?.message?.content;
+
+  if (!content) {
+    // Cause-specific terminal errors — retrying won't help.
+    if (finishReason === "length") {
+      /** @type {ProviderError} */
+      const e = new Error(
+        "[translate] output truncated (finish_reason=length) — reduce maxInputCharsPerChunk or increase maxOutputTokens"
+      );
+      e.terminal = true;
+      e.response = response;
+      throw e;
+    }
+    if (refusal) {
+      /** @type {ProviderError} */
+      const e = new Error(`[translate] model refused: ${refusal}`);
+      e.terminal = true;
+      e.response = response;
+      throw e;
+    }
+    if (finishReason === "content_filter") {
+      /** @type {ProviderError} */
+      const e = new Error(
+        "[translate] response filtered by content moderation"
+      );
+      e.terminal = true;
+      e.response = response;
+      throw e;
+    }
+    // Otherwise: truly empty with no signal — likely transient, retry.
+    /** @type {ProviderError} */
+    const e = new Error("[translate] empty response from OpenRouter");
+    e.response = response;
+    throw e;
+  }
+  return content;
+};
+
+const parseJsonContent = (content, response) => {
+  try {
+    return JSON.parse(content);
+  } catch (err) {
+    /** @type {ProviderError} */
+    const e = new Error(
+      `[translate] could not parse JSON response: ${err.message}\nRaw: ${String(content).slice(0, 500)}`
+    );
+    e.response = response;
+    throw e;
+  }
 };
 
 const init = ({ providerOptions, clientFactory }) => {
@@ -235,6 +367,7 @@ const init = ({ providerOptions, clientFactory }) => {
       signal,
       voice,
       glossary,
+      constraints,
     }) {
       if (!apiKey) {
         throw new Error(
@@ -249,6 +382,7 @@ const init = ({ providerOptions, clientFactory }) => {
         format,
         voice,
         glossary,
+        constraints,
       });
 
       // Build the request body fresh per attempt so we can append corrective
@@ -321,75 +455,17 @@ const init = ({ providerOptions, clientFactory }) => {
           signal ? { signal } : undefined
         );
 
-        // OpenRouter routing error shape: `error` field on the response body.
-        if (response?.error) {
-          const msg =
-            response.error.message || JSON.stringify(response.error);
-          /** @type {ProviderError} */
-          const e = new Error(`[translate] OpenRouter error: ${msg}`);
-          e.terminal = true;
-          throw e;
-        }
+        const content = extractContent(response);
+        const parsed = parseJsonContent(content, response);
 
-        const choice = response?.choices?.[0];
-        const finishReason = choice?.finish_reason;
-        const refusal = choice?.message?.refusal;
-        const content = choice?.message?.content;
-
-        if (!content) {
-          // Cause-specific terminal errors — retrying won't help.
-          if (finishReason === "length") {
-            /** @type {ProviderError} */
-            const e = new Error(
-              "[translate] output truncated (finish_reason=length) — reduce maxInputCharsPerChunk or increase maxOutputTokens"
-            );
-            e.terminal = true;
-            e.response = response;
-            throw e;
-          }
-          if (refusal) {
-            /** @type {ProviderError} */
-            const e = new Error(`[translate] model refused: ${refusal}`);
-            e.terminal = true;
-            e.response = response;
-            throw e;
-          }
-          if (finishReason === "content_filter") {
-            /** @type {ProviderError} */
-            const e = new Error(
-              "[translate] response filtered by content moderation"
-            );
-            e.terminal = true;
-            e.response = response;
-            throw e;
-          }
-          // Otherwise: truly empty with no signal — likely transient, retry.
-          /** @type {ProviderError} */
-          const e = new Error("[translate] empty response from OpenRouter");
-          e.response = response;
-          throw e;
-        }
-
-        let parsed;
-        try {
-          parsed = JSON.parse(content);
-        } catch (err) {
-          /** @type {ProviderError} */
-          const e = new Error(
-            `[translate] could not parse JSON response: ${err.message}\nRaw: ${String(content).slice(0, 500)}`
-          );
-          e.response = response;
-          throw e;
-        }
-
-        validateShape(text, parsed.translations, format, content);
+        validateShape(text, parsed.translations, format, content, constraints);
         return parsed.translations;
       };
 
       let lastError;
-      // When the previous attempt's HTML output failed validation, carry the
-      // failure detail forward so the next attempt sees its own bad output +
-      // a corrective user message.
+      // When the previous attempt's output failed validation (HTML structure
+      // or length constraints), carry the failure detail forward so the next
+      // attempt sees its own bad output + a corrective user message.
       let corrections;
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         if (signal?.aborted) throw makeAbortError();
@@ -404,13 +480,160 @@ const init = ({ providerOptions, clientFactory }) => {
           if (err?.terminal) throw err;
           lastError = err;
           logRetry(attempt, err, err?.response);
-          corrections = err?.htmlMismatch || undefined;
+          corrections = err?.correctable || undefined;
           if (attempt < MAX_ATTEMPTS) {
             await sleepWithBackoff(attempt, signal);
           }
         }
       }
       throw lastError || new Error("[translate] exhausted retries");
+    },
+
+    /**
+     * Rewrite texts that failed CMS validation at save time. Each item is a
+     * text already in the target locale plus the validation message it
+     * violated (e.g. "title must be at most 50 characters"). Returns the
+     * revised strings in the same order. Used by the orchestrator's
+     * save-repair loop, so the AI gets the exact failure reason and can
+     * regenerate e.g. a shorter title with the same meaning.
+     *
+     * @param {object} args
+     * @param {Array<{ text: string, issue: string, maxLength?: number }>} args.items
+     * @param {string} args.targetLocale
+     * @param {string} [args.voice]
+     * @param {AbortSignal} [args.signal]
+     * @returns {Promise<string[]>}
+     */
+    async fixText({ items, targetLocale, voice, signal }) {
+      if (!apiKey) {
+        throw new Error(
+          "[translate] OPENROUTER_API_KEY is not set — refusing to translate"
+        );
+      }
+      if (!Array.isArray(items) || items.length === 0) return [];
+
+      const systemPrompt = [
+        `You are a professional copy editor working in ${targetLocale}.`,
+        voice || "",
+        "Each input has a `text` that was rejected by a CMS validation rule and the `issue` describing why.",
+        "Rewrite each text so it satisfies its rule while preserving the original meaning and language as closely as possible.",
+        "Character limits are hard limits — count characters (including spaces), prefer shorter synonyms and tighter phrasing, never truncate mid-word or append ellipses.",
+        "",
+        "Rules:",
+        "- Output JSON exactly matching the schema: { fixed: string[] }.",
+        "- The fixed array MUST have the same length as the inputs array, in the same order.",
+        "- Do NOT change the language of the text.",
+        "- Do NOT add explanations, prefixes, or suffixes.",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const constraints = items.map((it) =>
+        typeof it.maxLength === "number" ? { maxLength: it.maxLength } : undefined
+      );
+
+      const buildRequest = (corrections) => {
+        const messages = [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: JSON.stringify({
+              inputs: items.map(({ text, issue }) => ({ text, issue })),
+            }),
+          },
+        ];
+        if (corrections) {
+          messages.push({
+            role: "assistant",
+            content: corrections.rawAssistantContent,
+          });
+          messages.push({
+            role: "user",
+            content: buildCorrectionPrompt(corrections.failures),
+          });
+        }
+        return {
+          model,
+          models: [model, ...fallbackModels].filter(Boolean),
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "validation_fix_batch",
+              strict: true,
+              schema: {
+                type: "object",
+                properties: {
+                  fixed: {
+                    type: "array",
+                    items: { type: "string" },
+                  },
+                },
+                required: ["fixed"],
+                additionalProperties: false,
+              },
+            },
+          },
+          messages,
+          max_tokens: maxOutputTokens,
+          temperature: 0.3,
+        };
+      };
+
+      const attemptOnce = async (corrections) => {
+        if (signal?.aborted) throw makeAbortError();
+        const response = await client.chat.completions.create(
+          buildRequest(corrections),
+          signal ? { signal } : undefined
+        );
+        const content = extractContent(response);
+        const parsed = parseJsonContent(content, response);
+        const fixed = parsed.fixed;
+        if (!Array.isArray(fixed)) {
+          throw new Error("fixText output is not an array");
+        }
+        if (fixed.length !== items.length) {
+          throw new Error(
+            `fixText length mismatch: expected ${items.length}, got ${fixed.length}`
+          );
+        }
+        // Where we know the numeric limit, verify the rewrite actually fits
+        // and re-ask with corrective feedback if not.
+        const failures = describeLengthFailures(fixed, constraints);
+        if (failures.length > 0) {
+          /** @type {ProviderError} */
+          const e = new Error(
+            `fixText validation failed — ${failures
+              .map((f) => `item ${f.index}: ${f.summary}`)
+              .join("; ")}`
+          );
+          e.correctable = { rawAssistantContent: content, failures };
+          throw e;
+        }
+        return fixed;
+      };
+
+      let lastError;
+      let corrections;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (signal?.aborted) throw makeAbortError();
+        try {
+          return await attemptOnce(corrections);
+        } catch (err) {
+          if (err?.name === "AbortError" || signal?.aborted) {
+            throw makeAbortError();
+          }
+          if (err?.terminal) throw err;
+          lastError = err;
+          getLogger().warn(
+            `[translate] fixText retry ${attempt}/${MAX_ATTEMPTS}: ${err?.message || err}`
+          );
+          corrections = err?.correctable || undefined;
+          if (attempt < MAX_ATTEMPTS) {
+            await sleepWithBackoff(attempt, signal);
+          }
+        }
+      }
+      throw lastError || new Error("[translate] fixText exhausted retries");
     },
 
     async usage() {
@@ -474,4 +697,4 @@ const init = ({ providerOptions, clientFactory }) => {
   };
 };
 
-module.exports = { init, meta: { name: "openrouter", displayName: "OpenRouter" } };
+export default { init, meta: { name: "openrouter", displayName: "OpenRouter" } };

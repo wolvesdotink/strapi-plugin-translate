@@ -1,5 +1,3 @@
-"use strict";
-
 // Translation memory cache.
 //
 // Keyed by SHA-256 of (source-text, sourceLocale, targetLocale, format,
@@ -10,7 +8,7 @@
 // but fine here because the eviction trigger is rare and translation jobs
 // rarely re-touch entries.
 
-const crypto = require("node:crypto");
+import crypto from "node:crypto";
 
 const STORE_KEY = { type: "plugin", name: "translate", key: "cache" };
 
@@ -33,16 +31,22 @@ const fingerprintGlossary = (glossary) => {
     .slice(0, 16);
 };
 
-const hashEntry = ({ source, sourceLocale, targetLocale, format, voice, glossary }) => {
-  const payload = stableStringify({
+const hashEntry = ({ source, sourceLocale, targetLocale, format, voice, glossary, constraints }) => {
+  const entry = {
     s: source,
     sl: sourceLocale,
     tl: targetLocale,
     f: format,
     v: voice || "",
     g: fingerprintGlossary(glossary),
-  });
-  return crypto.createHash("sha256").update(payload).digest("hex");
+  };
+  // Schema constraints (e.g. maxLength) change what a valid translation is,
+  // so they're part of the key — but only when present, so entries cached
+  // before constraints existed keep their hashes.
+  if (constraints && Object.keys(constraints).length > 0) {
+    entry.c = constraints;
+  }
+  return crypto.createHash("sha256").update(stableStringify(entry)).digest("hex");
 };
 
 const isCacheEnabled = (strapi) => {
@@ -56,7 +60,7 @@ const maxEntries = (strapi) => {
   return cfg.cacheMaxEntries || DEFAULT_MAX_ENTRIES;
 };
 
-module.exports = ({ strapi }) => {
+const cacheService = ({ strapi }) => {
   const store = () => strapi.store(STORE_KEY);
 
   const readAll = async () => {
@@ -170,5 +174,12 @@ module.exports = ({ strapi }) => {
   };
 };
 
-module.exports.hashEntry = hashEntry;
-module.exports.fingerprintGlossary = fingerprintGlossary;
+// Attach the pure helpers to the factory so callers that hold the default
+// export (e.g. cache.test.js) can reach them as properties, matching the
+// prior CJS `module.exports.hashEntry` behavior.
+cacheService.hashEntry = hashEntry;
+cacheService.fingerprintGlossary = fingerprintGlossary;
+
+export default cacheService;
+
+export { hashEntry, fingerprintGlossary };

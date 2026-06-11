@@ -295,6 +295,123 @@ describe("openrouter provider", () => {
     ).rejects.toThrow(/length mismatch/i);
   }, 30_000);
 
+  it("renders length constraints into the system prompt", async () => {
+    const fake = makeFakeClient({ respond: async () => okResp(["Hi", "World"]) });
+    const provider = openrouter.init({
+      providerOptions: baseOpts,
+      clientFactory: fake.factory,
+    });
+    await provider.translate({
+      text: ["Hallo", "Welt"],
+      sourceLocale: "de",
+      targetLocale: "en",
+      format: "plain",
+      constraints: [{ maxLength: 10 }, undefined],
+    });
+    const system = fake.calls[0].body.messages[0].content;
+    expect(system).toContain("inputs[0] must be at most 10 characters");
+    expect(system).not.toContain("inputs[1]");
+  });
+
+  it("retries with corrective feedback when output exceeds maxLength", async () => {
+    let n = 0;
+    const fake = makeFakeClient({
+      respond: async () => {
+        n += 1;
+        if (n === 1) return okResp(["this translation is way too long"]);
+        return okResp(["short"]);
+      },
+    });
+    const provider = openrouter.init({
+      providerOptions: baseOpts,
+      clientFactory: fake.factory,
+    });
+    const out = await provider.translate({
+      text: ["kurz"],
+      sourceLocale: "de",
+      targetLocale: "en",
+      format: "plain",
+      constraints: [{ maxLength: 10 }],
+    });
+    expect(out).toEqual(["short"]);
+    expect(fake.calls).toHaveLength(2);
+    // Second attempt carries the failed output + a corrective user message.
+    const retryMsgs = fake.calls[1].body.messages;
+    expect(retryMsgs).toHaveLength(4);
+    expect(retryMsgs[2].role).toBe("assistant");
+    expect(retryMsgs[3].role).toBe("user");
+    expect(retryMsgs[3].content).toMatch(/item 0/i);
+    expect(retryMsgs[3].content).toMatch(/at most 10/i);
+  }, 15_000);
+
+  describe("fixText", () => {
+    const okFixResp = (fixed) => ({
+      model: "mock-model",
+      choices: [
+        { finish_reason: "stop", message: { content: JSON.stringify({ fixed }) } },
+      ],
+    });
+
+    it("rewrites failing texts using the validation message", async () => {
+      const fake = makeFakeClient({ respond: async () => okFixResp(["Kurzer Titel"]) });
+      const provider = openrouter.init({
+        providerOptions: baseOpts,
+        clientFactory: fake.factory,
+      });
+      const out = await provider.fixText({
+        items: [
+          {
+            text: "Ein viel zu langer übersetzter Titel",
+            issue: "title must be at most 20 characters",
+            maxLength: 20,
+          },
+        ],
+        targetLocale: "de",
+        voice: "warm",
+      });
+      expect(out).toEqual(["Kurzer Titel"]);
+      const userMsg = fake.calls[0].body.messages[1].content;
+      expect(userMsg).toContain("Ein viel zu langer übersetzter Titel");
+      expect(userMsg).toContain("at most 20 characters");
+      const system = fake.calls[0].body.messages[0].content;
+      expect(system).toContain("warm");
+    });
+
+    it("re-asks with corrective feedback when the rewrite still exceeds maxLength", async () => {
+      let n = 0;
+      const fake = makeFakeClient({
+        respond: async () => {
+          n += 1;
+          if (n === 1) return okFixResp(["immer noch viel zu lang"]);
+          return okFixResp(["passt"]);
+        },
+      });
+      const provider = openrouter.init({
+        providerOptions: baseOpts,
+        clientFactory: fake.factory,
+      });
+      const out = await provider.fixText({
+        items: [{ text: "zu lang", issue: "must be at most 10 characters", maxLength: 10 }],
+        targetLocale: "de",
+      });
+      expect(out).toEqual(["passt"]);
+      expect(fake.calls).toHaveLength(2);
+      const retryMsgs = fake.calls[1].body.messages;
+      expect(retryMsgs[3].content).toMatch(/at most 10/i);
+    }, 15_000);
+
+    it("returns [] for empty input without calling the API", async () => {
+      const fake = makeFakeClient({ respond: async () => okFixResp(["never"]) });
+      const provider = openrouter.init({
+        providerOptions: baseOpts,
+        clientFactory: fake.factory,
+      });
+      const out = await provider.fixText({ items: [], targetLocale: "de" });
+      expect(out).toEqual([]);
+      expect(fake.calls).toHaveLength(0);
+    });
+  });
+
   describe("estimate", () => {
     it("returns token counts without pricing", async () => {
       const provider = openrouter.init({ providerOptions: baseOpts });

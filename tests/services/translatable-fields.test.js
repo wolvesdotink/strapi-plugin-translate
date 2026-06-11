@@ -189,4 +189,42 @@ describe("translatable-fields service", () => {
       expect(dive === true || typeof dive === "object").toBe(true);
     });
   });
+
+  describe("constraints", () => {
+    it("exposes maxLength/minLength on translatable fields", () => {
+      const models = {
+        "api::page.page": {
+          kind: "collectionType",
+          attributes: {
+            title: {
+              type: "string",
+              maxLength: 50,
+              minLength: 3,
+              pluginOptions: { translate: { translate: "translate" } },
+            },
+            teaser: {
+              type: "text",
+              maxLength: 200,
+              pluginOptions: { translate: { translate: "translate" } },
+            },
+            note: {
+              type: "string",
+              pluginOptions: { translate: { translate: "translate" } },
+            },
+            count: {
+              type: "integer",
+              maxLength: 5, // nonsense on integers — must not leak through
+            },
+          },
+        },
+      };
+      const svc = factory({ strapi: makeStrapi(models) });
+      const desc = svc.describe("api::page.page");
+      const byName = (n) => desc.attributes.find((a) => a.name === n);
+      expect(byName("title").constraints).toEqual({ maxLength: 50, minLength: 3 });
+      expect(byName("teaser").constraints).toEqual({ maxLength: 200 });
+      expect(byName("note").constraints).toBeUndefined();
+      expect(byName("count").constraints).toBeUndefined();
+    });
+  });
 });

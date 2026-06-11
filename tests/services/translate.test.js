@@ -386,3 +386,198 @@ describe("translate orchestrator", () => {
     ).rejects.toThrow(/must differ/);
   });
 });
+
+describe("translate orchestrator — schema constraints & save repair", () => {
+  // title carries a maxLength like a real CMS title field would.
+  const models = {
+    "api::page.page": {
+      kind: "collectionType",
+      attributes: {
+        title: {
+          type: "string",
+          maxLength: 12,
+          pluginOptions: { translate: { translate: "translate" } },
+        },
+        published: { type: "boolean" },
+      },
+    },
+  };
+
+  const sourceEntry = {
+    documentId: "doc-1",
+    locale: "de",
+    title: "Hallo Welt",
+    published: true,
+  };
+
+  const makeValidationError = (errors) => {
+    const e = new Error(`${errors.length} errors occurred`);
+    e.name = "ValidationError";
+    e.details = { errors };
+    return e;
+  };
+
+  // Mimics Strapi's entity validator for the title maxLength.
+  const makeValidatingDocuments = ({ upserts }) => (uid) => ({
+    async findOne({ locale }) {
+      return locale === "de" ? sourceEntry : null;
+    },
+    async update({ documentId, locale, data }) {
+      upserts.push({ uid, documentId, locale, data });
+      if (typeof data.title === "string" && data.title.length > 12) {
+        throw makeValidationError([
+          {
+            path: ["title"],
+            message: "title must be at most 12 characters",
+            name: "ValidationError",
+          },
+        ]);
+      }
+      return { documentId, locale, ...data };
+    },
+  });
+
+  it("passes field maxLength constraints to the provider", async () => {
+    const providerCalls = [];
+    const provider = {
+      async translate({ text, constraints }) {
+        providerCalls.push({ text, constraints });
+        return text.map(() => "Hi");
+      },
+      async usage() {
+        return { count: 0, limit: null };
+      },
+    };
+    const { strapi } = buildStrapi({ models, sourceEntry, provider });
+    const svc = translateFactory({ strapi });
+    await svc.translateDocument({
+      uid: "api::page.page",
+      documentId: "doc-1",
+      sourceLocale: "de",
+      targetLocale: "en",
+    });
+    const titleCall = providerCalls.find((c) => c.text.includes("Hallo Welt"));
+    expect(titleCall.constraints).toEqual([{ maxLength: 12 }]);
+  });
+
+  it("repairs a too-long translation when the save fails validation", async () => {
+    const fixTextCalls = [];
+    const provider = {
+      async translate({ text }) {
+        // Deliberately overshoot the 12-char limit.
+        return text.map(() => "A much too long translated title");
+      },
+      async fixText({ items, targetLocale }) {
+        fixTextCalls.push({ items, targetLocale });
+        return items.map(() => "Short title");
+      },
+      async usage() {
+        return { count: 0, limit: null };
+      },
+    };
+    const upserts = [];
+    const { strapi } = buildStrapi({ models, sourceEntry, provider });
+    strapi.documents = makeValidatingDocuments({ upserts });
+
+    const svc = translateFactory({ strapi });
+    const out = await svc.translateDocument({
+      uid: "api::page.page",
+      documentId: "doc-1",
+      sourceLocale: "de",
+      targetLocale: "en",
+    });
+
+    // Failed once, repaired, saved on the second attempt.
+    expect(upserts).toHaveLength(2);
+    expect(out.entry.title).toBe("Short title");
+
+    // The AI got the failing text + the exact validation message and limit.
+    expect(fixTextCalls).toHaveLength(1);
+    expect(fixTextCalls[0].targetLocale).toBe("en");
+    expect(fixTextCalls[0].items[0].text).toBe("A much too long translated title");
+    expect(fixTextCalls[0].items[0].issue).toBe("title must be at most 12 characters");
+    expect(fixTextCalls[0].items[0].maxLength).toBe(12);
+
+    // The repair is surfaced to the editor as a warning.
+    const repair = out.warnings.find((w) => w.kind === "validation-repair");
+    expect(repair).toMatchObject({
+      path: "title",
+      before: "A much too long translated title",
+      after: "Short title",
+    });
+  });
+
+  it("does not AI-rewrite fields the LLM did not translate", async () => {
+    let fixTextCalled = false;
+    const provider = {
+      async translate({ text }) {
+        return text.map(() => "Hi");
+      },
+      async fixText() {
+        fixTextCalled = true;
+        return [];
+      },
+      async usage() {
+        return { count: 0, limit: null };
+      },
+    };
+    const upserts = [];
+    const { strapi } = buildStrapi({ models, sourceEntry, provider });
+    strapi.documents = (uid) => ({
+      async findOne({ locale }) {
+        return locale === "de" ? sourceEntry : null;
+      },
+      async update({ documentId, locale, data }) {
+        upserts.push({ uid, documentId, locale, data });
+        throw makeValidationError([
+          { path: ["published"], message: "published is invalid", name: "ValidationError" },
+        ]);
+      },
+    });
+
+    const svc = translateFactory({ strapi });
+    await expect(
+      svc.translateDocument({
+        uid: "api::page.page",
+        documentId: "doc-1",
+        sourceLocale: "de",
+        targetLocale: "en",
+      })
+    ).rejects.toThrow(/errors occurred/);
+    expect(fixTextCalled).toBe(false);
+    expect(upserts).toHaveLength(1);
+  });
+
+  it("gives up after two repair rounds and surfaces the validation error", async () => {
+    let fixTextCalls = 0;
+    const provider = {
+      async translate({ text }) {
+        return text.map(() => "A much too long translated title");
+      },
+      async fixText({ items }) {
+        fixTextCalls += 1;
+        // Still too long — the validator will reject it again.
+        return items.map((_, i) => `Still far too long, round ${fixTextCalls}.${i}`);
+      },
+      async usage() {
+        return { count: 0, limit: null };
+      },
+    };
+    const upserts = [];
+    const { strapi } = buildStrapi({ models, sourceEntry, provider });
+    strapi.documents = makeValidatingDocuments({ upserts });
+
+    const svc = translateFactory({ strapi });
+    await expect(
+      svc.translateDocument({
+        uid: "api::page.page",
+        documentId: "doc-1",
+        sourceLocale: "de",
+        targetLocale: "en",
+      })
+    ).rejects.toThrow(/must be at most 12 characters|errors occurred/);
+    // Initial attempt + 2 repaired retries.
+    expect(upserts).toHaveLength(3);
+    expect(fixTextCalls).toBe(2);
+  });
+});

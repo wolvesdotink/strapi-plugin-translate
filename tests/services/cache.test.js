@@ -124,4 +124,27 @@ describe("cache service", () => {
     // After eviction (drops 500 oldest when over) we keep no more than 3.
     expect(stats.size).toBeLessThanOrEqual(3);
   });
+
+  it("includes constraints in the hash only when present", () => {
+    const base = {
+      source: "hi",
+      sourceLocale: "de",
+      targetLocale: "en",
+      format: "plain",
+      voice: "warm",
+      glossary: {},
+    };
+    // Absent / empty constraints keep the pre-constraints hash so existing
+    // cache entries stay valid.
+    expect(factory.hashEntry({ ...base, constraints: undefined })).toBe(
+      factory.hashEntry(base)
+    );
+    expect(factory.hashEntry({ ...base, constraints: {} })).toBe(
+      factory.hashEntry(base)
+    );
+    // A real constraint changes what a valid translation is → new key.
+    expect(factory.hashEntry({ ...base, constraints: { maxLength: 50 } })).not.toBe(
+      factory.hashEntry(base)
+    );
+  });
 });
