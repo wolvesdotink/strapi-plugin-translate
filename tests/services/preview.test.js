@@ -148,6 +148,148 @@ describe("preview service lifecycle", () => {
     expect(gone).toBeNull();
   });
 
+  it("accept with excludedPaths keeps the current value for those fields", async () => {
+    let committed = null;
+    const translateMock = {
+      translateDocumentDry: async () => ({
+        proposed: { title: "Hello", body: "World" },
+        warnings: [],
+        translatedPaths: ["title", "body"],
+      }),
+      commitPreview: async (args) => {
+        committed = args;
+        return { documentId: args.documentId, locale: args.targetLocale };
+      },
+    };
+    const strapi = makeStrapi(translateMock, { title: "Hallo", body: "Welt" });
+    const svc = factory({ strapi });
+    const out = await svc.create({
+      uid: "api::page.page",
+      documentId: "d",
+      sourceLocale: "de",
+      targetLocale: "en",
+    });
+    const accept = await svc.accept(out.previewId, {
+      excludedPaths: ["title"],
+    });
+    expect(accept.ok).toBe(true);
+    // Excluded field reverted to the target locale's current value.
+    expect(committed.proposed.title).toBe("Hallo");
+    // Still-selected field keeps the translation.
+    expect(committed.proposed.body).toBe("World");
+    // The repair loop must not rewrite the kept field.
+    expect(committed.translatedPaths).toEqual(["body"]);
+  });
+
+  it("accept with excludedPaths drops fields that have no current value", async () => {
+    let committed = null;
+    const translateMock = {
+      translateDocumentDry: async () => ({
+        proposed: { title: "Hello", subtitle: "New here" },
+        warnings: [],
+      }),
+      commitPreview: async (args) => {
+        committed = args;
+        return { documentId: args.documentId, locale: args.targetLocale };
+      },
+    };
+    // Target locale entry exists but has no subtitle.
+    const strapi = makeStrapi(translateMock, { title: "Hallo" });
+    const svc = factory({ strapi });
+    const out = await svc.create({
+      uid: "api::page.page",
+      documentId: "d",
+      sourceLocale: "de",
+      targetLocale: "en",
+    });
+    await svc.accept(out.previewId, { excludedPaths: ["subtitle"] });
+    expect("subtitle" in committed.proposed).toBe(false);
+    expect(committed.proposed.title).toBe("Hello");
+  });
+
+  it("accept with excludedPaths splices excluded new array elements", async () => {
+    let committed = null;
+    const translateMock = {
+      translateDocumentDry: async () => ({
+        proposed: { items: [{ label: "One" }, { label: "Two" }] },
+        warnings: [],
+      }),
+      commitPreview: async (args) => {
+        committed = args;
+        return { documentId: args.documentId, locale: args.targetLocale };
+      },
+    };
+    // Target currently has only the first item.
+    const strapi = makeStrapi(translateMock, { items: [{ label: "Eins" }] });
+    const svc = factory({ strapi });
+    const out = await svc.create({
+      uid: "api::page.page",
+      documentId: "d",
+      sourceLocale: "de",
+      targetLocale: "en",
+    });
+    // diff reports items.0.label (changed) and items.1 (added)
+    await svc.accept(out.previewId, { excludedPaths: ["items.1"] });
+    expect(committed.proposed.items).toEqual([{ label: "One" }]);
+  });
+
+  it("accept ignores excludedPaths that are not part of the diff", async () => {
+    let committed = null;
+    const translateMock = {
+      translateDocumentDry: async () => ({
+        proposed: { title: "Hello" },
+        warnings: [],
+      }),
+      commitPreview: async (args) => {
+        committed = args;
+        return { documentId: args.documentId, locale: args.targetLocale };
+      },
+    };
+    const strapi = makeStrapi(translateMock, { title: "Hallo" });
+    const svc = factory({ strapi });
+    const out = await svc.create({
+      uid: "api::page.page",
+      documentId: "d",
+      sourceLocale: "de",
+      targetLocale: "en",
+    });
+    await svc.accept(out.previewId, {
+      excludedPaths: ["nope", "createdBy", "__proto__.polluted"],
+    });
+    expect(committed.proposed.title).toBe("Hello");
+    expect({}.polluted).toBeUndefined();
+  });
+
+  it("a failed accept with excludedPaths leaves the stored payload intact", async () => {
+    let calls = 0;
+    const translateMock = {
+      translateDocumentDry: async () => ({
+        proposed: { title: "Hello" },
+        warnings: [],
+      }),
+      commitPreview: async (args) => {
+        calls += 1;
+        if (calls === 1) throw new Error("validation failed");
+        return { documentId: args.documentId, locale: args.targetLocale };
+      },
+    };
+    const strapi = makeStrapi(translateMock, { title: "Hallo" });
+    const svc = factory({ strapi });
+    const out = await svc.create({
+      uid: "api::page.page",
+      documentId: "d",
+      sourceLocale: "de",
+      targetLocale: "en",
+    });
+    await expect(
+      svc.accept(out.previewId, { excludedPaths: ["title"] })
+    ).rejects.toThrow("validation failed");
+    // The stored preview must still hold the untouched translation so a
+    // retry with a different selection starts from the original.
+    const row = await svc.get(out.previewId);
+    expect(row.proposed.title).toBe("Hello");
+  });
+
   it("returns not-found for unknown preview ids", async () => {
     const translateMock = {
       translateDocumentDry: async () => ({ proposed: {}, warnings: [] }),

@@ -1,5 +1,3 @@
-"use strict";
-
 // HTTP-facing controller for the translate plugin. Mounted under /translate/...
 // All routes are admin-scoped (require an authenticated admin user).
 //
@@ -60,7 +58,7 @@ const deriveOverallState = (targets) => {
   return "done";
 };
 
-module.exports = ({ strapi }) => {
+export default ({ strapi }) => {
   const jobs = () => strapi.plugin("translate").service("jobs");
   const translate = () => strapi.plugin("translate").service("translate");
   const settings = () => strapi.plugin("translate").service("settings");
@@ -634,6 +632,8 @@ module.exports = ({ strapi }) => {
 
     /**
      * POST /translate/preview/:id/accept
+     * body: { excludedPaths?: string[] } — diff paths the editor deselected;
+     * those fields keep the target locale's current value.
      * Commits the proposed payload.
      */
     async acceptPreview(ctx) {
@@ -642,7 +642,11 @@ module.exports = ({ strapi }) => {
       if (!userCanOnUid(ctx, row.uid, [READ_ACTION, UPDATE_ACTION])) {
         return ctx.forbidden("missing permission for this content type");
       }
-      const res = await preview().accept(ctx.params.id);
+      const body = ctx.request.body || {};
+      const excludedPaths = Array.isArray(body.excludedPaths)
+        ? body.excludedPaths.filter((p) => typeof p === "string")
+        : [];
+      const res = await preview().accept(ctx.params.id, { excludedPaths });
       if (!res.ok && res.reason === "not-found") return ctx.notFound("preview not found");
       ctx.body = res;
     },

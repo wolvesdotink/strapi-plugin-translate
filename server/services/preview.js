@@ -1,5 +1,3 @@
-"use strict";
-
 // Preview-before-save flow.
 //
 // translateDocumentPreview() runs the same walker + provider calls as
@@ -11,7 +9,7 @@
 // Accept applies the proposed payload via the existing translate service's
 // internal upsert path. Discard just deletes the cached preview.
 
-const crypto = require("node:crypto");
+import crypto from "node:crypto";
 
 const STORE_KEY = { type: "plugin", name: "translate", key: "previews" };
 const TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -74,7 +72,60 @@ const newId = () =>
     ? crypto.randomUUID()
     : `prev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 
-module.exports = ({ strapi }) => {
+// Numeric-aware descending path sort. Excluded paths are reverted one by
+// one; when reverting removes an array element (splice), later indices
+// shift — processing deepest/highest indices first keeps the remaining
+// paths valid.
+const comparePathsDesc = (a, b) => {
+  const sa = a.split(".");
+  const sb = b.split(".");
+  const n = Math.min(sa.length, sb.length);
+  for (let i = 0; i < n; i++) {
+    if (sa[i] === sb[i]) continue;
+    const na = /^\d+$/.test(sa[i]) ? Number(sa[i]) : null;
+    const nb = /^\d+$/.test(sb[i]) ? Number(sb[i]) : null;
+    if (na !== null && nb !== null) return nb - na;
+    return sb[i] < sa[i] ? -1 : 1;
+  }
+  return sb.length - sa.length;
+};
+
+/**
+ * Revert a set of diff paths on the proposed payload so those fields keep
+ * whatever the target locale currently holds. Mutates `proposed` in place
+ * (callers pass a clone).
+ *
+ * - before defined   -> write the current value back over the translation
+ * - before undefined -> the field doesn't exist in the target today; drop it
+ *   from the payload (splicing array elements so no `null` holes remain)
+ */
+const revertExcludedPaths = (proposed, diffRows, excludedPaths) => {
+  const byPath = new Map(diffRows.map((d) => [d.path, d]));
+  const paths = excludedPaths
+    .filter((p) => byPath.has(p))
+    .sort(comparePathsDesc);
+  for (const path of paths) {
+    const segments = path.split(".");
+    let parent = proposed;
+    for (let i = 0; i < segments.length - 1 && parent != null; i++) {
+      parent = parent[segments[i]];
+    }
+    if (parent == null || typeof parent !== "object") continue;
+    const leaf = segments[segments.length - 1];
+    const before = byPath.get(path).before;
+    if (before === undefined) {
+      if (Array.isArray(parent) && /^\d+$/.test(leaf)) {
+        parent.splice(Number(leaf), 1);
+      } else {
+        delete parent[leaf];
+      }
+    } else {
+      parent[leaf] = before;
+    }
+  }
+};
+
+export default ({ strapi }) => {
   const store = () => strapi.store(STORE_KEY);
 
   const readAll = async () => {
@@ -139,6 +190,7 @@ module.exports = ({ strapi }) => {
         targetLocale,
         actingUserId: actingUserId || null,
         proposed: result.proposed,
+        translatedPaths: result.translatedPaths || [],
         warnings: result.warnings || [],
         diff: d,
         createdAt: Date.now(),
@@ -158,23 +210,69 @@ module.exports = ({ strapi }) => {
     /**
      * Apply a preview. Calls the translate service's upsert helper with
      * the previously-computed payload, then removes the preview.
+     *
+     * `excludedPaths` (diff paths the editor deselected in the UI) are
+     * reverted to the target locale's current value before committing, so
+     * those fields keep their existing translation. Only paths present in
+     * the stored diff are honoured.
      */
-    async accept(id) {
+    async accept(id, { excludedPaths } = {}) {
       const data = await readAll();
       cleanupExpired(data);
       const row = data[id];
       if (!row) return { ok: false, reason: "not-found" };
+
+      const excluded = Array.isArray(excludedPaths)
+        ? excludedPaths.filter((p) => typeof p === "string" && p.length > 0)
+        : [];
+      // Clone before mutating: if the commit throws, the stored row must
+      // keep the untouched payload so a retry with a different selection
+      // starts from the original translation.
+      let proposed = row.proposed;
+      let translatedPaths =
+        Array.isArray(row.translatedPaths) && row.translatedPaths.length > 0
+          ? row.translatedPaths
+          : undefined;
+      if (excluded.length > 0) {
+        proposed = JSON.parse(JSON.stringify(row.proposed || {}));
+        revertExcludedPaths(proposed, row.diff || [], excluded);
+        const excludedSet = new Set(excluded);
+        if (translatedPaths) {
+          translatedPaths = translatedPaths.filter((p) => !excludedSet.has(p));
+        }
+      }
+
       const translate = strapi.plugin("translate").service("translate");
-      const entry = await translate.commitPreview({
-        uid: row.uid,
-        documentId: row.documentId,
-        targetLocale: row.targetLocale,
-        proposed: row.proposed,
-        actingUserId: row.actingUserId,
-      });
+      const repairWarnings = [];
+      const entry = await translate.commitPreview(
+        {
+          uid: row.uid,
+          documentId: row.documentId,
+          targetLocale: row.targetLocale,
+          proposed,
+          actingUserId: row.actingUserId,
+          // Previews stored before translatedPaths existed have no list —
+          // pass undefined so the repair loop falls back to its permissive
+          // "any non-empty string" matching instead of repairing nothing.
+          translatedPaths,
+        },
+        {
+          onRepair: (repairs) => {
+            for (const r of repairs) {
+              repairWarnings.push({
+                kind: "validation-repair",
+                path: r.path,
+                message: r.message,
+                before: r.before,
+                after: r.after,
+              });
+            }
+          },
+        }
+      );
       delete data[id];
       await writeAll(data);
-      return { ok: true, entry, warnings: row.warnings };
+      return { ok: true, entry, warnings: [...(row.warnings || []), ...repairWarnings] };
     },
 
     async discard(id) {
@@ -188,4 +286,4 @@ module.exports = ({ strapi }) => {
   };
 };
 
-module.exports.diff = diff;
+export { diff };

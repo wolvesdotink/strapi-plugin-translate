@@ -178,6 +178,9 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
   const [preview, setPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [committingPreview, setCommittingPreview] = useState(false);
+  // Diff paths the editor deselected — these fields keep the current value
+  // when the preview is applied.
+  const [excludedPaths, setExcludedPaths] = useState(() => new Set());
 
   // Cost estimate + locale-status pills
   const [localeStatus, setLocaleStatus] = useState([]);
@@ -330,6 +333,9 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
 
   const previewAvailable = targets.length === 1;
   const effectivePreview = previewMode && previewAvailable;
+
+  const previewDiffCount = preview?.diff?.length || 0;
+  const previewAppliedCount = previewDiffCount - excludedPaths.size;
 
   // Pending until we have a job snapshot. Build a placeholder list from the
   // picker selection so the running screen has something to render before the
@@ -506,6 +512,7 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
         targetLocale: targets[0],
       });
       setPreview(res.data);
+      setExcludedPaths(new Set());
       setPhase("preview");
     } catch (err) {
       const message = extractErrorMessage(err);
@@ -529,11 +536,22 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
     }
   };
 
+  const toggleDiffPath = (path) => {
+    setExcludedPaths((cur) => {
+      const next = new Set(cur);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
   const acceptPreview = async () => {
     if (!preview?.previewId) return;
     setCommittingPreview(true);
     try {
-      await post(`/translate/preview/${preview.previewId}/accept`);
+      await post(`/translate/preview/${preview.previewId}/accept`, {
+        excludedPaths: Array.from(excludedPaths),
+      });
       toggleNotification({
         type: "success",
         message: formatMessage(
@@ -1253,6 +1271,16 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
                       },
                       { count: preview.diff?.length || 0 }
                     )}
+                    {previewDiffCount > 0 && (
+                      <>
+                        {" "}
+                        {formatMessage({
+                          id: `${pluginId}.preview.selectHint`,
+                          defaultMessage:
+                            "Uncheck a change to keep the current value for that field.",
+                        })}
+                      </>
+                    )}
                   </Typography>
                 </Box>
               </Box>
@@ -1349,15 +1377,29 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
                   paddingLeft={1}
                   paddingRight={1}
                 >
-                  <Typography
-                    variant="sigma"
-                    textColor="neutral600"
-                  >
-                    {formatMessage({
-                      id: `${pluginId}.preview.changesHeader`,
-                      defaultMessage: "Changes",
-                    })}
-                  </Typography>
+                  <Flex gap={2} alignItems="baseline">
+                    <Typography
+                      variant="sigma"
+                      textColor="neutral600"
+                    >
+                      {formatMessage({
+                        id: `${pluginId}.preview.changesHeader`,
+                        defaultMessage: "Changes",
+                      })}
+                    </Typography>
+                    <Typography variant="pi" textColor="neutral500">
+                      {formatMessage(
+                        {
+                          id: `${pluginId}.preview.selectedCount`,
+                          defaultMessage: "{selected} of {total} selected",
+                        },
+                        {
+                          selected: previewAppliedCount,
+                          total: previewDiffCount,
+                        }
+                      )}
+                    </Typography>
+                  </Flex>
                   <Flex gap={3} alignItems="center">
                     <Flex gap={1} alignItems="center">
                       <Box
@@ -1394,6 +1436,7 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
                     {(preview.diff || []).slice(0, 100).map((d, i) => {
                       const before = renderDiffValue(d.before);
                       const after = renderDiffValue(d.after);
+                      const excluded = excludedPaths.has(d.path);
                       return (
                         <Box
                           key={i}
@@ -1404,28 +1447,67 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
                           borderStyle="solid"
                           shadow="tableShadow"
                         >
-                          <Box
+                          <Flex
                             paddingTop={2}
                             paddingBottom={2}
                             paddingLeft={3}
                             paddingRight={3}
                             background="neutral100"
                             borderColor="neutral200"
+                            justifyContent="space-between"
+                            alignItems="center"
+                            gap={3}
                             style={{ borderBottomWidth: 1, borderBottomStyle: "solid" }}
                           >
                             <Typography
                               variant="pi"
                               fontWeight="bold"
-                              textColor="neutral700"
+                              textColor={excluded ? "neutral500" : "neutral700"}
                               title={d.path}
                             >
                               {humanizePath(d.path)}
                             </Typography>
-                          </Box>
+                            <Box shrink={0}>
+                              <Checkbox
+                                name={`apply-change-${i}`}
+                                checked={!excluded}
+                                onCheckedChange={() => toggleDiffPath(d.path)}
+                              >
+                                <Typography variant="pi" textColor="neutral600">
+                                  {formatMessage({
+                                    id: `${pluginId}.preview.applyField`,
+                                    defaultMessage: "Apply",
+                                  })}
+                                </Typography>
+                              </Checkbox>
+                            </Box>
+                          </Flex>
+                          {excluded && (
+                            <Box
+                              paddingTop={2}
+                              paddingBottom={2}
+                              paddingLeft={3}
+                              paddingRight={3}
+                              background="neutral100"
+                            >
+                              <Typography
+                                variant="pi"
+                                textColor="neutral600"
+                                style={{ fontStyle: "italic" }}
+                              >
+                                {formatMessage({
+                                  id: `${pluginId}.preview.keepingCurrent`,
+                                  defaultMessage:
+                                    "This field will keep its current value.",
+                                })}
+                              </Typography>
+                            </Box>
+                          )}
                           <Flex
                             direction="column"
                             alignItems="stretch"
                             gap={0}
+                            style={{ opacity: excluded ? 0.45 : 1 }}
                           >
                             <Box
                               paddingTop={2}
@@ -1642,12 +1724,24 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
             <Button
               onClick={acceptPreview}
               loading={committingPreview}
-              disabled={committingPreview}
+              disabled={
+                committingPreview ||
+                (previewDiffCount > 0 && previewAppliedCount === 0)
+              }
             >
-              {formatMessage({
-                id: `${pluginId}.preview.accept`,
-                defaultMessage: "Apply translation",
-              })}
+              {previewDiffCount > 0 && excludedPaths.size > 0
+                ? formatMessage(
+                    {
+                      id: `${pluginId}.preview.acceptSelected`,
+                      defaultMessage:
+                        "Apply {count, plural, one {# change} other {# changes}}",
+                    },
+                    { count: previewAppliedCount }
+                  )
+                : formatMessage({
+                    id: `${pluginId}.preview.accept`,
+                    defaultMessage: "Apply translation",
+                  })}
             </Button>
           </Flex>
         )}
