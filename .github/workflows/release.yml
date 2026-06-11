@@ -1,0 +1,52 @@
+name: Release
+
+# Triggered by pushing a version tag (e.g. v0.1.0). This workflow builds,
+# verifies, and tests the plugin, publishes it to npm, and then creates the
+# matching GitHub Release with auto-generated notes.
+#
+# Cut a release with: ./scripts/release.sh patch   (bumps, tags, and pushes)
+#
+# Publishing uses npm trusted publishing (OIDC) — no NPM_TOKEN secret needed.
+# The trusted publisher must be configured on npmjs.com for this package:
+# GitHub Actions, org "wolvesdotink", repo "strapi-plugin-translate",
+# workflow filename "release.yml". Provenance is generated automatically.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24 ships an npm new enough for trusted publishing (>= 11.5.1)
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify package
+        run: npm run verify
+
+      - name: Test
+        run: npm test
+
+      - name: Publish to npm
+        run: npm publish
+
+      - name: Create GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

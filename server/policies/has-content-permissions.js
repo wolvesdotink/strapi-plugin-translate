@@ -1,5 +1,3 @@
-"use strict";
-
 // Permission policy for translate-plugin routes that target a specific
 // content-type uid supplied in the request body.
 //
@@ -14,9 +12,9 @@
 //                  target are the same content type)
 //   hasAtLeastOne: boolean — when true, any one matching action is enough
 
-const { policy } = require("@strapi/utils");
+import { policy } from "@strapi/utils";
 
-module.exports = policy.createPolicy({
+export default policy.createPolicy({
   name: "plugin::translate.hasContentPermissions",
   handler(ctx, config = {}) {
     const { actions = [], sourceActions = [], hasAtLeastOne = false } = config;

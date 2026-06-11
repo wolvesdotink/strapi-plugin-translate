@@ -1,5 +1,3 @@
-"use strict";
-
 // Admin-scoped routes for the translate plugin. Mounted at /translate/* under
 // the admin API host (requires authenticated admin session).
 //
@@ -55,7 +53,7 @@ const settingsPermissions = () => [
 // supported locales, read-only settings/cache views).
 const authedOnly = () => ["admin::isAuthenticatedAdmin"];
 
-module.exports = [
+export default [
   {
     method: "POST",
     path: "/document",

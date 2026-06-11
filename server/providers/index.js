@@ -1,5 +1,3 @@
-"use strict";
-
 // Provider registry. Decouples the translate service from the concrete LLM
 // backend; new providers register themselves here and become selectable via
 // `provider: "<name>"` in the plugin config.
@@ -10,6 +8,8 @@
 //     async usage() -> { count: number, limit: number|null, error?: string }
 //     async estimate?({ text }) -> { inputTokens, estimatedOutputTokens, estimatedCostUsd? }
 //   }
+
+import openrouter from "./openrouter";
 
 const registry = new Map();
 
@@ -50,6 +50,6 @@ const list = () => [...registry.keys()];
 const has = (name) => registry.has(name);
 
 // Pre-register the bundled providers.
-register("openrouter", require("./openrouter"));
+register("openrouter", openrouter);
 
-module.exports = { register, resolve, list, has };
+export default { register, resolve, list, has };

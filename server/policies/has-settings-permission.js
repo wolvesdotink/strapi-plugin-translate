@@ -1,14 +1,12 @@
-"use strict";
-
 // Permission policy for translate-plugin routes that mutate plugin-global
 // state (settings, glossary, voice, cache). Gates on the dedicated
 // `plugin::translate.settings` admin action registered in bootstrap.js.
 
-const { policy } = require("@strapi/utils");
+import { policy } from "@strapi/utils";
 
 const ACTION_ID = "plugin::translate.settings";
 
-module.exports = policy.createPolicy({
+export default policy.createPolicy({
   name: "plugin::translate.hasSettingsPermission",
   handler(ctx) {
     const { userAbility } = ctx.state;
@@ -17,4 +15,4 @@ module.exports = policy.createPolicy({
   },
 });
 
-module.exports.ACTION_ID = ACTION_ID;
+export { ACTION_ID };

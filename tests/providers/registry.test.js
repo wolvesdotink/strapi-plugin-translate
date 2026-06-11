@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 describe("provider registry", () => {
   let providers;
   beforeEach(async () => {
-    // Reset module cache so each test gets a fresh registry
-    delete require.cache[require.resolve("../../server/providers/index.js")];
-    providers = require("../../server/providers/index.js");
+    // Reset module registry so each test gets a fresh provider Map
+    vi.resetModules();
+    providers = (await import("../../server/providers/index.js")).default;
   });
 
   it("has openrouter pre-registered", () => {

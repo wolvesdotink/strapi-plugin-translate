@@ -1,5 +1,3 @@
-"use strict";
-
 // Back-translate sanity check.
 //
 // After a forward translation, optionally round-trip the result back to the
@@ -68,7 +66,7 @@ const sampleItems = (items, { perGroup = 5, maxTotal = 30 } = {}) => {
   return indexed.slice(0, Math.min(perGroup, maxTotal));
 };
 
-module.exports = ({ strapi }) => {
+export default ({ strapi }) => {
   return {
     normalize,
     similarity,
@@ -142,6 +140,4 @@ module.exports = ({ strapi }) => {
   };
 };
 
-module.exports.similarity = similarity;
-module.exports.normalize = normalize;
-module.exports.sampleItems = sampleItems;
+export { similarity, normalize, sampleItems };

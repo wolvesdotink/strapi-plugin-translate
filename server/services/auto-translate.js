@@ -1,5 +1,3 @@
-"use strict";
-
 // Auto-translate lifecycle hook.
 //
 // Subscribes to Strapi v5's document service middleware. On a configured
@@ -37,7 +35,7 @@ const ruleMatches = (rule, { uid, action, locale }) => {
   return true;
 };
 
-module.exports = ({ strapi }) => {
+export default ({ strapi }) => {
   let installed = false;
   return {
     /**
@@ -201,4 +199,4 @@ module.exports = ({ strapi }) => {
   };
 };
 
-module.exports.ruleMatches = ruleMatches;
+export { ruleMatches };

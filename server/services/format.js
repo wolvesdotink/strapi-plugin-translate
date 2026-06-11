@@ -1,11 +1,9 @@
-"use strict";
-
 // Format helpers. The CKEditor fields in this project store HTML strings;
 // we keep them as a single string per field and instruct the LLM to preserve
 // tags exactly. Blocks (Strapi native rich text) is handled by walking the
 // JSON tree and translating only `text` properties of nodes.
 
-const { parse } = require("node-html-parser");
+import { parse } from "node-html-parser";
 
 // --------- HTML ---------
 
@@ -176,7 +174,7 @@ const applyBlocksTexts = (blocks, items, translations) => {
   return clone;
 };
 
-module.exports = () => ({
+export default () => ({
   isWhitespaceOnly,
   compareHtmlStructure,
   validateHtmlShape,

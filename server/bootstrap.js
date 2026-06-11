@@ -1,10 +1,8 @@
-"use strict";
-
 // Runs after register(). Restores any persisted job state, wires the
 // auto-translate lifecycle hooks, and registers the admin action that
 // gates settings/cache mutations.
 
-module.exports = async ({ strapi }) => {
+export default async ({ strapi }) => {
   // Register the `plugin::translate.settings` admin action so it can be
   // granted/revoked per role in the admin UI and enforced by the
   // hasSettingsPermission policy on plugin-global mutation routes.

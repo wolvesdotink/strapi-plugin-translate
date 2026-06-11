@@ -1,5 +1,3 @@
-"use strict";
-
 // In-memory registry of in-flight translation jobs.
 //
 // The controller hands off a long-running translation to the service and
@@ -119,7 +117,7 @@ const cleanupExpired = () => {
   if (changed) persist();
 };
 
-module.exports = ({ strapi }) => {
+export default ({ strapi }) => {
   strapiRef = strapi;
   return {
     // Recover persisted jobs from the store. Any in-flight (`pending` /

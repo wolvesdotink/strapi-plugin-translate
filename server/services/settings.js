@@ -1,5 +1,3 @@
-"use strict";
-
 // User-editable plugin settings persisted in `strapi.store` so admins can
 // tune voice/glossary at runtime without redeploying. The settings object
 // merges:
@@ -69,7 +67,7 @@ const sanitize = (raw, supportedCodes) => ({
   },
 });
 
-module.exports = ({ strapi }) => {
+export default ({ strapi }) => {
   const store = () => strapi.store(STORE_KEY);
 
   // Defaults snapshot taken at register-time and stashed on the plugin

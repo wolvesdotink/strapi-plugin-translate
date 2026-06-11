@@ -5,10 +5,10 @@ Translation providers plug into the plugin via the registry in
 optionally `meta`:
 
 ```js
-module.exports = {
+export default {
   init({ providerOptions }) {
     return {
-      async translate({ text, sourceLocale, targetLocale, format, signal, voice, glossary }) {
+      async translate({ text, sourceLocale, targetLocale, format, signal, voice, glossary, constraints }) {
         // returns string[] same length and order as `text`
       },
       async usage() {
@@ -16,6 +16,10 @@ module.exports = {
       },
       async estimate({ text }) {
         // optional; returns { inputTokens, estimatedOutputTokens, estimatedCostUsd?, items }
+      },
+      async fixText({ items, targetLocale, voice, signal }) {
+        // optional; rewrites texts that failed CMS validation at save time.
+        // items: [{ text, issue, maxLength? }] — returns string[] same length/order
       },
     };
   },
@@ -25,17 +29,27 @@ module.exports = {
 
 ## Registering
 
+The provider registry (`server/providers/index.js`) is **bundled into the
+published package** — the server is compiled to a single `dist/` bundle, so the
+registry is not importable as a standalone module from an installed copy, and
+registering against a separately-imported copy would mutate a different registry
+instance than the running server uses.
+
+To add a provider, register it inside the plugin's own server source and
+rebuild:
+
 ```js
-// somewhere in your app's bootstrap
-const providers = require("strapi-plugin-translate/server/providers");
-providers.register("your-provider", require("./your-provider"));
+// server/providers/index.js — alongside the bundled openrouter registration
+import yourProvider from "./your-provider";
+register("your-provider", yourProvider);
 ```
 
-Then configure the plugin to use it:
+The cleanest path is to contribute the provider upstream (or maintain a fork).
+Then select it via config:
 
 ```js
 // config/plugins.js
-module.exports = {
+export default {
   translate: {
     enabled: true,
     config: {
@@ -61,6 +75,23 @@ module.exports = {
   prompt or equivalent provider-side mechanism. `glossary.preserveExact` is a
   list of strings to keep verbatim; `glossary.perLocale[targetLocale]` is a
   `{source: target}` map of preferred mappings.
+- **`constraints`**: optional array aligned with `text`; each entry is
+  `undefined` or `{ maxLength?, minLength? }` taken from the Strapi attribute
+  schema. A translation that violates `maxLength` fails the entity validator at
+  save time, so the provider should make the model respect the limit (the
+  bundled OpenRouter provider folds it into the prompt and re-asks with
+  corrective feedback when the output overshoots).
+
+## `fixText()` semantics
+
+Optional. The orchestrator's save-repair loop calls it when the target-locale
+upsert is rejected by Strapi's entity validation on an LLM-written field —
+e.g. a translated title that outgrew the schema's `maxLength`. Each item
+carries the failing `text` (already in `targetLocale`), the exact validation
+`issue` message, and `maxLength` when the limit could be parsed from the
+message. Return the rewritten strings (same length and order) — same meaning,
+same language, but satisfying the rule. Providers without `fixText` simply
+surface the validation error unchanged.
 
 ## `usage()` semantics
 

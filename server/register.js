@@ -1,14 +1,12 @@
-"use strict";
-
 // Runs at plugin registration (before bootstrap). Wires the configured provider
 // and loads the glossary so they are ready by the time controllers are called.
 
-const path = require("path");
-const fs = require("fs");
+import path from "path";
+import fs from "fs";
 
-const providers = require("./providers");
+import providers from "./providers";
 
-module.exports = ({ strapi }) => {
+export default ({ strapi }) => {
   const pluginConfig = strapi.config.get("plugin::translate") || {};
   const providerName = pluginConfig.provider || "openrouter";
   const providerOptions = pluginConfig.providerOptions || {};

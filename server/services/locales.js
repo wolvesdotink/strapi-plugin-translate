@@ -1,5 +1,3 @@
-"use strict";
-
 // Locale source-of-truth for the plugin.
 //
 // The plugin used to maintain its own hardcoded SUPPORTED_LOCALES set in two
@@ -29,7 +27,7 @@ const FALLBACK_LOCALES = [
  * @typedef {{ codes: Set<string>, list: LocaleRecord[], fallback: boolean }} LocaleSnapshot
  */
 
-module.exports = ({ strapi }) => {
+export default ({ strapi }) => {
   let memo = null;
   let memoExpiresAt = 0;
 
@@ -111,4 +109,4 @@ module.exports = ({ strapi }) => {
   };
 };
 
-module.exports.FALLBACK_LOCALES = FALLBACK_LOCALES;
+export { FALLBACK_LOCALES };

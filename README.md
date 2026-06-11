@@ -11,6 +11,7 @@ AI-powered translation of localized Strapi v5 entries via [OpenRouter](https://o
 - **Cancellable jobs** — abort in-flight translations from the UI.
 - **Voice & glossary** — admin-editable tonality instructions, plus a per-locale glossary and a preserve-exactly list (brand/place names).
 - **Stale-relation preflight** — verifies relations/media exist before burning LLM tokens; surfaces dangling refs as warnings instead of aborting.
+- **Schema-constraint aware** — field `maxLength`/`minLength` limits are baked into the prompt up front, and if the save still fails Strapi validation (e.g. a translated title outgrew its limit), the exact validation message is fed back to the AI to regenerate the field — same meaning, shorter wording — and the save is retried automatically. Repairs are surfaced as warnings.
 - **OpenRouter** — uses OpenRouter's OpenAI-compatible API with structured JSON outputs and built-in model fallback.
 
 ## Requirements
@@ -23,12 +24,15 @@ AI-powered translation of localized Strapi v5 entries via [OpenRouter](https://o
 ## Installation
 
 ```bash
-npm install strapi-plugin-translate
+npm install @wolvesdotink/strapi-plugin-translate
 # or
-yarn add strapi-plugin-translate
+yarn add @wolvesdotink/strapi-plugin-translate
 # or
-bun add strapi-plugin-translate
+bun add @wolvesdotink/strapi-plugin-translate
 ```
+
+The plugin id is `translate` (unchanged by the package scope), so it is enabled
+under the `translate` key in `config/plugins.js` — see [Configuration](#configuration).
 
 ## Configuration
 

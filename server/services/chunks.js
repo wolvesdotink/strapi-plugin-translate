@@ -1,5 +1,3 @@
-"use strict";
-
 // Splits an array of strings into chunks below a max character budget so each
 // LLM request stays within a safe token window. Uses a rough char-to-token
 // approximation (≈ 1 token per 4 chars for European languages) — the actual
@@ -12,7 +10,7 @@
 
 const DEFAULT_MAX_CHARS = 3000;
 
-module.exports = () => ({
+export default () => ({
   chunk(strings, { maxChars = DEFAULT_MAX_CHARS, perItem = false } = {}) {
     if (perItem) return strings.map((s) => [s]);
     const chunks = [];

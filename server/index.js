@@ -1,29 +1,27 @@
-"use strict";
-
 // Plugin server entry. Registers lifecycle hooks, controllers, services, and routes.
 // This is the shape Strapi v5 expects from a local plugin's server export.
 
-const register = require("./register");
-const bootstrap = require("./bootstrap");
+import register from "./register";
+import bootstrap from "./bootstrap";
 
-const translateController = require("./controllers/translate");
-const translateService = require("./services/translate");
-const translatableFieldsService = require("./services/translatable-fields");
-const formatService = require("./services/format");
-const glossaryService = require("./services/glossary");
-const chunksService = require("./services/chunks");
-const jobsService = require("./services/jobs");
-const settingsService = require("./services/settings");
-const localesService = require("./services/locales");
-const cacheService = require("./services/cache");
-const previewService = require("./services/preview");
-const autoTranslateService = require("./services/auto-translate");
-const backTranslateService = require("./services/back-translate");
+import translateController from "./controllers/translate";
+import translateService from "./services/translate";
+import translatableFieldsService from "./services/translatable-fields";
+import formatService from "./services/format";
+import glossaryService from "./services/glossary";
+import chunksService from "./services/chunks";
+import jobsService from "./services/jobs";
+import settingsService from "./services/settings";
+import localesService from "./services/locales";
+import cacheService from "./services/cache";
+import previewService from "./services/preview";
+import autoTranslateService from "./services/auto-translate";
+import backTranslateService from "./services/back-translate";
 
-const adminRoutes = require("./routes/admin");
-const policies = require("./policies");
+import adminRoutes from "./routes/admin";
+import policies from "./policies";
 
-module.exports = {
+export default {
   register,
   bootstrap,
 
