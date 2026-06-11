@@ -22,9 +22,9 @@ jobs:
       contents: write # create the GitHub Release
       id-token: write # required for npm provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           # Node 24 ships an npm new enough for trusted publishing (>= 11.5.1)
           node-version: 24
