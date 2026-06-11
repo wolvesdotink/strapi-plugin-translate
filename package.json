@@ -1,6 +1,6 @@
 {
   "name": "@wolvesdotink/strapi-plugin-translate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI-powered translation of localized Strapi v5 entries via OpenRouter LLMs.",
   "keywords": [
     "strapi",
