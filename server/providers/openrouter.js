@@ -183,6 +183,7 @@ const resolveFormatService = () => {
 // Returns CorrectableFailure entries for the corrective retry loop.
 const describeLengthFailures = (output, constraints) => {
   if (!Array.isArray(constraints)) return [];
+  /** @type {CorrectableFailure[]} */
   const failures = [];
   for (let i = 0; i < output.length; i++) {
     const c = constraints[i];
@@ -214,6 +215,7 @@ const validateShape = (input, output, format, rawAssistantContent, constraints) 
       `translation length mismatch: expected ${input.length}, got ${output.length}`
     );
   }
+  /** @type {CorrectableFailure[]} */
   const failures = [];
   if (format === "html") {
     const fmt = resolveFormatService();

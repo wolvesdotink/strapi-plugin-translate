@@ -215,6 +215,9 @@ export default ({ strapi }) => {
      * reverted to the target locale's current value before committing, so
      * those fields keep their existing translation. Only paths present in
      * the stored diff are honoured.
+     *
+     * @param {string} id
+     * @param {{ excludedPaths?: string[] }} [options]
      */
     async accept(id, { excludedPaths } = {}) {
       const data = await readAll();

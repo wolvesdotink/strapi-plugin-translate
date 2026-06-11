@@ -58,20 +58,20 @@
   },
   "dependencies": {
     "node-html-parser": "^7.0.0",
-    "openai": "^4.0.0"
+    "openai": "^6.42.0"
   },
   "devDependencies": {
     "@strapi/design-system": "^2.2.0",
     "@strapi/icons": "^2.2.0",
-    "@strapi/sdk-plugin": "^6.1.0",
-    "@strapi/utils": "^5.47.0",
+    "@strapi/sdk-plugin": "^6.1.1",
+    "@strapi/utils": "^5.48.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-intl": "^6.8.9",
     "react-router-dom": "^6.30.4",
     "styled-components": "^6.4.2",
-    "typescript": "^5.5.0",
-    "vitest": "^2.1.0"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
   },
   "peerDependencies": {
     "@strapi/design-system": "^2.0.0",

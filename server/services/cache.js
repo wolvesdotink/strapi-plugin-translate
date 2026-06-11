@@ -31,6 +31,7 @@ const fingerprintGlossary = (glossary) => {
     .slice(0, 16);
 };
 
+/** @param {{ source: string, sourceLocale: any, targetLocale: any, format: any, voice: any, glossary: any, constraints?: any }} entry */
 const hashEntry = ({ source, sourceLocale, targetLocale, format, voice, glossary, constraints }) => {
   const entry = {
     s: source,
