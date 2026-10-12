@@ -18,10 +18,12 @@ AI-powered translation of localized Strapi v5 entries via [OpenRouter](https://o
 
 ## Requirements
 
-- Strapi v5.48 or later (`@strapi/strapi` ^5.48.0)
-- Node.js 20+ (development and integration checks use Node 24)
+- Strapi v5.57 or later (`@strapi/strapi` ^5.57.0)
+- Node.js 22.12+ (development and integration checks use Node 24)
 - An [OpenRouter](https://openrouter.ai) API key
-- The `@strapi/plugin-i18n` plugin enabled (this plugin reads locales from it)
+- The `@strapi/i18n` plugin enabled (this plugin reads locales from it)
+
+The admin dependencies use the latest compatible React 18, React Router 6, and React Intl 7 releases. Strapi's admin requires React 18 and React Router 6; React Intl 8+ uses a separate context that cannot consume Strapi's existing translation provider. TypeScript stays on 5 to satisfy React Intl 7's declared peer range. Other direct dependencies use their latest stable releases.
 
 ## Installation
 
@@ -160,7 +162,7 @@ Edits are stored in `strapi.store` and picked up on the next translation job. "R
 
 ## Supported locales
 
-The plugin reads locales from `@strapi/plugin-i18n` at request time — whatever locales you enable in `Settings → Internationalization` become valid targets. No code change required to add a locale. (If the i18n plugin is unavailable, a small fallback set is used so the plugin still loads.)
+The plugin reads locales from `@strapi/i18n` at request time — whatever locales you enable in `Settings → Internationalization` become valid targets. No code change required to add a locale. (If the i18n plugin is unavailable, a small fallback set is used so the plugin still loads.)
 
 ## Glossary file
 
@@ -194,7 +196,7 @@ All routes are admin-scoped (require an authenticated admin user).
 | GET    | `/translate/jobs/:id`             | Poll job status                                          |
 | POST   | `/translate/jobs/:id/cancel`      | Cancel a job                                             |
 | GET    | `/translate/usage`                | OpenRouter credit usage                                  |
-| GET    | `/translate/locales`              | Locales from `@strapi/plugin-i18n`                       |
+| GET    | `/translate/locales`              | Locales from `@strapi/i18n`                       |
 | GET    | `/translate/settings`             | Voice + glossary                                         |
 | PUT    | `/translate/settings`             | Save voice + glossary                                    |
 | POST   | `/translate/settings/reset`       | Reset to register-time defaults                          |
@@ -308,7 +310,7 @@ POST /translate/preview/:id/accept
 
 ## Before and after
 
-These screenshots come from the actual Strapi 5.48 admin using a disposable SQLite app and a deterministic translation provider. They do not require an OpenRouter key.
+The fixtures run against Strapi 5.57. These screenshots were captured with the actual Strapi 5.48 admin using a disposable SQLite app and a deterministic translation provider. They do not require an OpenRouter key.
 
 ![Before: the existing page editor](docs/screenshots/before-editor.png)
 ![After: choose modules and languages following a source save](docs/screenshots/after-save-prompt.png)

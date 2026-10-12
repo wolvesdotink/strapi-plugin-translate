@@ -12,8 +12,7 @@
 //   provider.usage()
 //     -> Promise<{ count, limit }>
 
-// openai v4 supports both `require("openai")` and `require("openai").OpenAI`.
-// We use the named export so tests can mock cleanly via `vi.mock("openai", ...)`.
+// Use the named SDK export; tests can inject clients with clientFactory.
 import { OpenAI } from "openai";
 
 import formatFactory from "../services/format";

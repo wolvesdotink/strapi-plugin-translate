@@ -31,12 +31,12 @@ export async function initFixture(dir = fixtureDir, pluginDir = root) {
     private: true,
     strapi: { uuid: "translate-fixture" },
     dependencies: {
-      "@strapi/strapi": "5.48.0",
-      "@strapi/i18n": "5.48.0",
+      "@strapi/strapi": "5.57.0",
+      "@strapi/i18n": "5.57.0",
       react: "^18.3.1",
       "react-dom": "^18.3.1",
-      "react-router-dom": "^6.30.4",
-      "styled-components": "^6.4.2",
+      "react-router-dom": "^6.30.6",
+      "styled-components": "^6.5.3",
     },
   });
   await fs
