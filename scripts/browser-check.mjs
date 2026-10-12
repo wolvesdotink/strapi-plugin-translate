@@ -167,6 +167,7 @@ try {
   await page.goto(
     `${base}/admin/content-manager/collection-types/api::page.page/${documentId}?plugins[i18n][locale]=en`,
   );
+  await page.getByRole("button", { name: "Save", exact: true }).waitFor();
   await page.getByRole("button", { name: /Featured articles -/ }).click();
   await page.locator('input[name="modules.1.title"]').waitFor();
   await capture(page, "after-english-content.png");
