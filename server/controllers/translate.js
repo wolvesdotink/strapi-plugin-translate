@@ -36,29 +36,78 @@ const permissionField = (strapi, uid, path) => {
   return parts.join(".");
 };
 
-const authorizeChanges = (strapi, ctx) => async prepared => {
-  const checker = strapi.plugin("content-manager").service("permission-checker").create({ userAbility: ctx.state.userAbility, model: prepared.uid });
-  if (checker.cannot.read(prepared.source) || (prepared.target ? checker.cannot.update(prepared.target) : checker.cannot.create())) {
-    throw Object.assign(new Error("Missing permission for this document or language."), { status: 403 });
+const authorizeChanges = (strapi, ctx) => async (prepared) => {
+  const checker = strapi
+    .plugin("content-manager")
+    .service("permission-checker")
+    .create({ userAbility: ctx.state.userAbility, model: prepared.uid });
+  const createSubject = { locale: prepared.targetLocale };
+  if (
+    checker.cannot.read(prepared.source) ||
+    (prepared.target
+      ? checker.cannot.read(prepared.target) ||
+        checker.cannot.update(prepared.target)
+      : checker.cannot.create(createSubject))
+  ) {
+    throw Object.assign(
+      new Error("Missing permission for this document or language."),
+      { status: 403 },
+    );
   }
   for (const op of prepared.ops) {
     const field = permissionField(strapi, prepared.uid, op.path);
-    if (checker.cannot.read(prepared.source, field) || (prepared.target ? checker.cannot.update(prepared.target, field) : checker.cannot.create(null, field))) {
-      throw Object.assign(new Error(`Missing permission for field ${field}.`), { status: 403 });
+    if (
+      checker.cannot.read(prepared.source, field) ||
+      (prepared.target
+        ? checker.cannot.read(prepared.target, field) ||
+          checker.cannot.update(prepared.target, field)
+        : checker.cannot.create(createSubject, field))
+    ) {
+      throw Object.assign(new Error(`Missing permission for field ${field}.`), {
+        status: 403,
+      });
     }
   }
   if (prepared.proposed) {
-    const sanitized = prepared.target ? await checker.sanitizeUpdateInput(prepared.target)(prepared.proposed) : await checker.sanitizeCreateInput(prepared.proposed);
-    if (fingerprint(sanitized) !== fingerprint(prepared.proposed)) throw Object.assign(new Error("The selected module contains fields you cannot update."), { status: 403 });
+    const sanitized = prepared.target
+      ? await checker.sanitizeUpdateInput(prepared.target)(prepared.proposed)
+      : await checker.sanitizeCreateInput(prepared.proposed);
+    if (fingerprint(sanitized) !== fingerprint(prepared.proposed))
+      throw Object.assign(
+        new Error("The selected module contains fields you cannot update."),
+        { status: 403 },
+      );
   }
-  const relations = Object.values(prepared.current.fields).filter(f => f.type === "relation" && (prepared.initialTranslation || prepared.ops.some(op => op.moduleKey === f.moduleKey)));
+  const relations = Object.values(prepared.current.fields).filter(
+    (f) =>
+      f.type === "relation" &&
+      (prepared.initialTranslation ||
+        prepared.ops.some((op) => op.moduleKey === f.moduleKey)),
+  );
   for (const ref of relations) {
     if (!strapi.getModel(ref.target)?.pluginOptions?.i18n?.localized) continue;
-    const relatedChecker = strapi.plugin("content-manager").service("permission-checker").create({ userAbility: ctx.state.userAbility, model: ref.target });
-    for (const documentId of Array.isArray(ref.value) ? ref.value : ref.value ? [ref.value] : []) {
+    const relatedChecker = strapi
+      .plugin("content-manager")
+      .service("permission-checker")
+      .create({ userAbility: ctx.state.userAbility, model: ref.target });
+    for (const documentId of Array.isArray(ref.value)
+      ? ref.value
+      : ref.value
+        ? [ref.value]
+        : []) {
       for (const locale of [prepared.sourceLocale, prepared.targetLocale]) {
-        const entry = await strapi.documents(ref.target).findOne({ documentId, locale, status: "draft" });
-        if (entry && (relatedChecker.cannot.read(entry) || (entry.title && relatedChecker.cannot.read(entry, "title")))) throw Object.assign(new Error("Missing read permission for a linked item."), { status: 403 });
+        const entry = await strapi
+          .documents(ref.target)
+          .findOne({ documentId, locale, status: "draft" });
+        if (
+          entry &&
+          (relatedChecker.cannot.read(entry) ||
+            (entry.title && relatedChecker.cannot.read(entry, "title")))
+        )
+          throw Object.assign(
+            new Error("Missing read permission for a linked item."),
+            { status: 403 },
+          );
       }
     }
   }
@@ -485,7 +534,10 @@ export default ({ strapi }) => {
           for (const target of snapshot.targets) {
             if (!target.result?.previewId) continue;
             const row = await selective.get(target.result.previewId, ctx.state.user.id);
-            if (!row) continue;
+            if (!row) {
+              // A discarded/expired preview cannot authorize its cached text.
+              return ctx.notFound("preview expired or not found");
+            }
             await authorizeChanges(strapi, ctx)(row.prepared);
             for (const child of row.children) await authorizeChanges(strapi, ctx)(child.prepared);
           }
@@ -676,7 +728,7 @@ export default ({ strapi }) => {
         for (const locale of await localesSvc().codes()) {
           if (locale === sourceLocale) continue;
           const target = await changes.load(body.uid, body.documentId, locale);
-          if (target ? checker.can.update(target) : checker.can.create({ locale })) targetLocales.push(locale);
+          if (target ? checker.can.read(target) && checker.can.update(target) : checker.can.create({ locale })) targetLocales.push(locale);
         }
         ctx.body = { ...out, targetLocales };
       } catch (err) { fail(ctx, err); }

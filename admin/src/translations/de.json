@@ -203,6 +203,8 @@
   "changes.missingLinks": "Einige verknüpfte Einträge benötigen eine Übersetzung",
   "changes.missingHelp": "Erstelle die Vorschau erneut mit aktivierter Übersetzung verknüpfter Einträge oder lasse optionale Verknüpfungen weg. Fehlende Pflichtverknüpfungen müssen aufgelöst werden.",
   "changes.omit": "Diese optionalen Verknüpfungen in dieser Sprache weglassen",
+  "changes.omitChild": "Optionale Verknüpfungen für {label} in dieser Sprache weglassen",
+  "changes.childMissingHelp": "Für diesen verknüpften Eintrag fehlen lokalisierte Verknüpfungen. Lass optionale Verknüpfungen hier weg oder erstelle erforderliche Übersetzungen, bevor du erneut eine Vorschau erzeugst.",
   "changes.failed": "Die Vorschau konnte nicht erstellt werden",
   "changes.match": "Passendes übersetztes Modul auswählen",
   "changes.later": "Später",

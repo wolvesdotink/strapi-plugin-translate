@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const base = process.env.TRANSLATE_FIXTURE_URL || "http://localhost:1348";
-const output = path.join(root, "docs/screenshots");
+const output =
+  process.env.TRANSLATE_SCREENSHOT_DIR || path.join(root, "docs/screenshots");
 await fs.mkdir(output, { recursive: true });
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome",
@@ -206,9 +207,105 @@ try {
     .getByRole("button", { name: "Apply en changes", exact: true })
     .click();
   await page.getByText("Changes applied", { exact: true }).waitFor();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Close", exact: true })
+    .click();
+
+  // A linked child needs a separate approval to omit its own missing links.
+  const createArticle = async (data) => {
+    const response = await page.request.post(
+      `${base}/content-manager/collection-types/api::article.article`,
+      {
+        headers,
+        data: { locale: "de", ...data },
+      },
+    );
+    assert.ok(response.ok(), await response.text());
+    return (await response.json()).data;
+  };
+  const articleB = await createArticle({
+    title: "Review article B",
+    body: "Second article",
+  });
+  const articleA = await createArticle({
+    title: "Review article A",
+    body: "First article",
+    related: { set: [{ documentId: articleB.documentId }] },
+  });
+  const current = await page.request.get(
+    `${base}/content-manager/collection-types/api::page.page/${documentId}?locale=de`,
+    { headers },
+  );
+  const currentSource = (await current.json()).data;
+  const save = await page.request.put(
+    `${base}/content-manager/collection-types/api::page.page/${documentId}`,
+    {
+      headers,
+      data: {
+        locale: "de",
+        modules: currentSource.modules.map((module) => ({
+          id: module.id,
+          __component: module.__component,
+          title: module.title,
+          description: module.description,
+          ...(module.articles
+            ? { articles: { set: [{ documentId: articleA.documentId }] } }
+            : {}),
+        })),
+      },
+    },
+  );
+  assert.ok(save.ok(), await save.text());
+  await page.goto(
+    `${base}/admin/content-manager/collection-types/api::page.page/${documentId}?plugins[i18n][locale]=de`,
+  );
+  await page
+    .getByRole("button", { name: "Review saved changes", exact: true })
+    .click();
+  await page.getByRole("checkbox", { name: /^English/ }).uncheck();
+  await page.getByRole("checkbox", { name: "French", exact: true }).check();
+  await page
+    .getByRole("checkbox", {
+      name: "Also translate pending changes to linked items",
+      exact: true,
+    })
+    .check();
+  await page
+    .getByRole("button", { name: "Preview translations", exact: true })
+    .click();
+  const childOmission = page.getByRole("checkbox", {
+    name: "Omit optional links for Review article A in this language",
+    exact: true,
+  });
+  await childOmission.waitFor({ timeout: 20000 });
+  const applyChild = page.getByRole("button", {
+    name: "Apply fr changes",
+    exact: true,
+  });
+  assert.equal(await applyChild.isDisabled(), true);
+  await childOmission.check();
+  const acceptance = page.waitForRequest(
+    (request) =>
+      request.url().includes("/accept") && request.method() === "POST",
+  );
+  await applyChild.click();
+  const acceptedBody = (await acceptance).postDataJSON();
+  assert.deepEqual(Object.values(acceptedBody.childAllowMissingRelations), [
+    true,
+  ]);
+  assert.equal(acceptedBody.allowMissingRelations, false);
+  await page.getByText("Changes applied", { exact: true }).waitFor();
+  const childResponse = await page.request.get(
+    `${base}/content-manager/collection-types/api::article.article/${articleA.documentId}?locale=fr`,
+    { headers },
+  );
+  const savedChild = (await childResponse.json()).data;
+  assert.equal(savedChild.locale, "fr");
+  assert.equal(savedChild.related.count, 0);
   assert.deepEqual(errors, []);
   console.log(
-    "PASS real admin save prompts, desktop/mobile previews, two-language review/acceptance, explicit missing-link handling, and preserved manual copy.",
+    "PASS real admin saves, desktop/mobile previews, two-language acceptance, parent/child optional-link approvals, and preserved manual copy.",
   );
 } catch (error) {
   await page

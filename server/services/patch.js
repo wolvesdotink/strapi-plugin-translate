@@ -3,6 +3,7 @@ import {
   get,
   set,
   writable,
+  initialPayload,
   problem,
   fingerprint,
 } from "./content-tree";
@@ -27,7 +28,7 @@ export function mergePatch(strapi, prepared, computed, ops = prepared.ops) {
     prepared.appliedPaths = Object.fromEntries(
       Object.values(prepared.current.nodes).map((n) => [n.key, n.path]),
     );
-    return clone(computed);
+    return initialPayload(strapi, prepared.uid, computed);
   }
   const data = writable(strapi, prepared.uid, prepared.target);
   const appliedPaths = {};
@@ -112,12 +113,18 @@ export function mergePatch(strapi, prepared, computed, ops = prepared.ops) {
     identities.forEach((key, index) => {
       if (!key) return;
       const sourcePath = prepared.current.nodes[key].path;
+      const oldPath = appliedPaths[key];
       const newPath = op.many ? targetPath.concat(index) : targetPath;
       for (const node of Object.values(prepared.current.nodes)) {
-        if (node.key === key || node.key.startsWith(`${key}/`))
-          appliedPaths[node.key] = newPath.concat(
-            node.path.slice(sourcePath.length),
-          );
+        if (node.key === key || node.key.startsWith(`${key}/`)) {
+          // Existing descendants can have an independently edited target
+          // order. Moving their ancestor only replaces the ancestor prefix.
+          const relativePath =
+            oldPath && appliedPaths[node.key]
+              ? appliedPaths[node.key].slice(oldPath.length)
+              : node.path.slice(sourcePath.length);
+          appliedPaths[node.key] = newPath.concat(relativePath);
+        }
       }
     });
     for (const key of op.beforeItems.filter((k) => !op.items.includes(k))) {

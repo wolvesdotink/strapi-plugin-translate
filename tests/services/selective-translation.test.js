@@ -40,6 +40,13 @@ const models = {
     info: { displayName: "Hero" },
     attributes: { title: text, description: text, hidden: { type: "string" } },
   },
+  container: {
+    modelType: "component",
+    info: { displayName: "Container" },
+    attributes: {
+      children: { type: "component", repeatable: true, component: "hero" },
+    },
+  },
   articles: {
     modelType: "component",
     info: { displayName: "Articles" },
@@ -325,6 +332,104 @@ describe("selective content identity and patching", () => {
       kind: "field",
       name: "title",
       value: "New source",
+    });
+  });
+  it("keeps target child correspondence after moving a differently ordered subtree", async () => {
+    const before = {
+      modules: [
+        {
+          id: 1,
+          __component: "container",
+          children: [
+            { id: 2, translationKey: "a", title: "A" },
+            { id: 3, translationKey: "b", title: "B" },
+          ],
+        },
+        { id: 4, __component: "articles", title: "Articles" },
+      ],
+    };
+    const currentTarget = {
+      modules: [
+        {
+          id: 10,
+          __component: "container",
+          children: [
+            { id: 30, translationKey: "b", title: "Manual B" },
+            { id: 20, translationKey: "a", title: "Manual A" },
+          ],
+        },
+        { id: 40, __component: "articles", title: "Manual articles" },
+      ],
+    };
+    const after = { modules: clone(before.modules).reverse() };
+    const prepared = prepare(before, after, currentTarget);
+    const data = mergePatch(strapi, prepared, {});
+    expect(data.modules[1].children.map((child) => child.id)).toEqual([30, 20]);
+    expect(
+      prepared.appliedPaths["root/modules:container:1/children:hero:a"],
+    ).toEqual(["modules", 1, "children", 1]);
+
+    let baseline;
+    const fakeState = {
+      key: () => "baseline",
+      read: async () => baseline,
+      write: async (_key, value) => {
+        baseline = clone(value);
+      },
+    };
+    const changes = changesFactory({
+      strapi: {
+        ...strapi,
+        plugin: () => ({
+          service: (name) =>
+            name === "state" ? fakeState : fieldsFactory({ strapi }),
+        }),
+      },
+    });
+    await changes.applied(prepared, prepared.ops, data);
+    const next = clone(after);
+    next.modules[1].children[0].title = "Changed A";
+    const nextPrepared = prepare(after, next, data);
+    nextPrepared.mapping = align(
+      nextPrepared.before,
+      nextPrepared.targetTree,
+      baseline.mapping,
+    ).mapping;
+    const changed = mergePatch(strapi, nextPrepared, {
+      modules: [null, { children: [{ title: "Translated A" }] }],
+    });
+    expect(changed.modules[1].children.map((child) => child.title)).toEqual([
+      "Manual B",
+      "Translated A",
+    ]);
+  });
+  it("strips initial source identities without losing writable relation commands", () => {
+    const prepared = prepare(source, source);
+    prepared.initialTranslation = true;
+    const computed = {
+      id: 1,
+      documentId: "source",
+      createdAt: "source-time",
+      updatedAt: "source-time",
+      title: "Translated",
+      modules: [
+        {
+          id: 2,
+          __component: "articles",
+          title: "Translated articles",
+          items: { set: ["a"] },
+        },
+      ],
+    };
+    expect(mergePatch(strapi, prepared, computed)).toEqual({
+      title: "Translated",
+      modules: [
+        {
+          __component: "articles",
+          title: "Translated articles",
+          items: { set: ["a"] },
+        },
+      ],
     });
   });
 });

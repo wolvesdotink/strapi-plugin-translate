@@ -232,17 +232,38 @@ export function ChangesModal({
     }));
   const target = job?.targets?.find((item) => item.locale === active);
   const preview = target?.state === "done" ? target.result : null;
-  const unresolved = (preview?.relations || []).filter(
-    (r) =>
-      !excluded[preview?.previewId]?.[r.fieldKey] &&
-      r.status === "missing" &&
-      !preview?.children?.some(
-        (c) => c.uid === r.uid && c.documentId === r.documentId,
+  const isSelected = (row) =>
+    row.initialTranslation ||
+    row.modules.some((module) =>
+      module.fields.some(
+        (field) => !excluded[row.previewId]?.[field.operationId || field.id],
       ),
-  );
-  const blocked =
-    unresolved.some((r) => r.required) ||
-    (unresolved.length > 0 && !omit[preview?.previewId]);
+    );
+  const missingRelations = (row) =>
+    (row?.relations || []).filter((relation) => {
+      const field = row.modules
+        .flatMap((module) => module.fields)
+        .find((field) => field.id === relation.fieldKey);
+      return (
+        !excluded[row.previewId]?.[field?.operationId || relation.fieldKey] &&
+        relation.status === "missing" &&
+        !row.children?.some(
+          (child) =>
+            isSelected(child) &&
+            child.uid === relation.uid &&
+            child.documentId === relation.documentId,
+        )
+      );
+    });
+  const blocked = [preview, ...(preview?.children || []).filter(isSelected)]
+    .filter(Boolean)
+    .some((row) => {
+      const missing = missingRelations(row);
+      return (
+        missing.some((relation) => relation.required) ||
+        (missing.length > 0 && !omit[row.previewId])
+      );
+    });
   const accept = async () => {
     if (!preview || blocked) return;
     setBusy(true);
@@ -263,6 +284,12 @@ export function ChangesModal({
             ]),
           ),
           allowMissingRelations: !!omit[preview.previewId],
+          childAllowMissingRelations: Object.fromEntries(
+            (preview.children || []).map((child) => [
+              child.previewId,
+              !!omit[child.previewId],
+            ]),
+          ),
         },
       );
       if (!mounted.current) return;
@@ -416,6 +443,44 @@ export function ChangesModal({
           </Typography>
         </Box>
       ))}
+      {isSelected(row) && missingRelations(row).length > 0 && (
+        <>
+          <Alert
+            variant="warning"
+            title={t("missingLinks", "Some linked items need a translation")}
+          >
+            {child
+              ? t(
+                  "childMissingHelp",
+                  "This linked item has missing localized links. Omit optional links here, or create required translations before generating again.",
+                )
+              : t(
+                  "missingHelp",
+                  "Generate again with linked-item translation enabled, or omit optional links. Required missing links must be resolved.",
+                )}
+          </Alert>
+          {!missingRelations(row).some((relation) => relation.required) && (
+            <Checkbox
+              checked={!!omit[row.previewId]}
+              disabled={busy || !!applied[active]}
+              onCheckedChange={(checked) =>
+                setOmit((current) => ({
+                  ...current,
+                  [row.previewId]: checked,
+                }))
+              }
+            >
+              {child
+                ? t(
+                    "omitChild",
+                    "Omit optional links for {label} in this language",
+                    { label: row.label },
+                  )
+                : t("omit", "Omit these optional links in this language")}
+            </Checkbox>
+          )}
+        </>
+      )}
     </Flex>
   );
 
@@ -589,37 +654,6 @@ export function ChangesModal({
                         {renderModules(child, true)}
                       </Box>
                     ))}
-                    {!!unresolved.length && (
-                      <Alert
-                        variant="warning"
-                        title={t(
-                          "missingLinks",
-                          "Some linked items need a translation",
-                        )}
-                      >
-                        {t(
-                          "missingHelp",
-                          "Generate again with linked-item translation enabled, or omit optional links. Required missing links must be resolved.",
-                        )}
-                      </Alert>
-                    )}
-                    {unresolved.length > 0 &&
-                      !unresolved.some((r) => r.required) && (
-                        <Checkbox
-                          checked={!!omit[preview.previewId]}
-                          onCheckedChange={(checked) =>
-                            setOmit((current) => ({
-                              ...current,
-                              [preview.previewId]: checked,
-                            }))
-                          }
-                        >
-                          {t(
-                            "omit",
-                            "Omit these optional links in this language",
-                          )}
-                        </Checkbox>
-                      )}
                   </>
                 ) : (
                   <>

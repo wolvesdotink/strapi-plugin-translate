@@ -56,7 +56,7 @@
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build",
     "fixture": "node scripts/fixture-app.mjs",
-    "test:integration": "npm run build && node scripts/integration-test.mjs",
+    "test:integration": "npm run build && node scripts/integration-test.mjs && node scripts/selective-regression-test.mjs",
     "test:browser": "node scripts/browser-check.mjs"
   },
   "dependencies": {

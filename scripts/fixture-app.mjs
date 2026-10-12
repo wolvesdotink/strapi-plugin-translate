@@ -89,7 +89,19 @@ export async function initFixture(dir = fixtureDir, pluginDir = root) {
     },
     options: { draftAndPublish: true },
     pluginOptions: { i18n: { localized: true } },
-    attributes: { title: text, body: { ...text, type: "text" } },
+    attributes: {
+      title: text,
+      body: { ...text, type: "text" },
+      related: {
+        type: "relation",
+        relation: "manyToMany",
+        target: "api::article.article",
+        pluginOptions: {
+          i18n: { localized: true },
+          translate: { translate: "copy" },
+        },
+      },
+    },
   });
   await write("src/components/blocks/hero.json", {
     collectionName: "components_heroes",

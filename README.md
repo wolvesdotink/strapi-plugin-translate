@@ -268,7 +268,7 @@ Relations marked `copy` in affected modules are checked for the same `documentId
 
 By default, article content is preserved and the existing localized item is linked. **Also translate pending changes to linked items** adds separate previews for changed direct children and missing localized versions. Child translations are applied before the parent link, in the same transaction for that language. Only changed child fields are translated when a baseline exists. The first release limits propagation to direct children, deduplicates repeated links, and avoids recursive graph translation.
 
-Missing optional localized items can be omitted with explicit review, or created using the linked-item option. Unresolved required relations block acceptance. Draft-only localized items are flagged in the preview; applying a page draft does not publish its articles.
+Missing optional localized items can be omitted with explicit review, or created using the linked-item option. Each linked-item preview has its own omission approval for its optional missing links; approving the page's omissions does not approve its children's omissions. Unresolved required relations block acceptance. Draft-only localized items are flagged in the preview; applying a page draft does not publish its articles.
 
 ### Review and persistence
 
@@ -297,9 +297,12 @@ GET /translate/jobs/:id
   -> targets[].result { previewId, modules, relations, children }
 
 POST /translate/preview/:id/accept
-  { excludedOperations?, childExcludedOperations?, allowMissingRelations? }
+  { excludedOperations?, childExcludedOperations?, allowMissingRelations?,
+    childAllowMissingRelations? }
   -> { ok, documentId, locale, linkedItems }
 ```
+
+`childAllowMissingRelations` maps child preview IDs to explicit boolean omission approvals. Required links cannot be omitted.
 
 `POST /translate/estimate` also accepts `mode: "changes"` and the same source/module/language selection. `alignments` is a map per target locale of source module keys to target module keys. The server validates selections against persisted snapshots. Scoped preview IDs begin with `change_`; the legacy single-language preview API remains supported.
 
@@ -334,7 +337,7 @@ npm run typecheck # tsc --noEmit (JSDoc-level)
 npm run test:integration # build, then exercise real Strapi + SQLite
 ```
 
-The integration fixture tests target component identity, localized nested relations, pending-language state, idempotent and concurrent acceptance, stale previews, metadata recovery, linked-item updates, and automatic propagation. Development integration checks use Node 24 and `better-sqlite3`; no production dependency is added.
+The integration fixtures test component identity (including independently ordered nested children), localized nested relations, pending-language state, idempotent and concurrent acceptance, stale previews, metadata recovery, linked-item updates, and automatic propagation. They also exercise the real controllers with locale/field-restricted Strapi abilities, initial creation by ordinary editors, and separate optional-link approval for children. Development integration checks use Node 24 and `better-sqlite3`; no production dependency is added.
 
 To reproduce admin checks and screenshots:
 

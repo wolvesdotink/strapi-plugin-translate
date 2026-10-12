@@ -215,6 +215,8 @@ export default ({ strapi }) => {
         child,
         {
           excludedOperations: childExcluded,
+          allowMissingRelations:
+            options.childAllowMissingRelations?.[child.id] === true,
           actingUserId: options.actingUserId,
         },
         authorize,

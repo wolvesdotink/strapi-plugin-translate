@@ -236,6 +236,18 @@ export function align(source, target, previous = {}, explicit = {}) {
 // Convert a populated target tree to a writable tree without leaking managed
 // fields or populated relation bodies. Preserve TARGET component IDs.
 export function writable(strapi, uid, entry, keepIds = true) {
+  return writeTree(strapi, uid, entry, { keepIds, populated: true });
+}
+
+// Computed translations already contain writable relation/media commands.
+// Remove source identities and audit fields without interpreting those
+// commands as populated entities or stripping keys inside arbitrary JSON.
+export function initialPayload(strapi, uid, entry) {
+  return writeTree(strapi, uid, entry, { keepIds: false, populated: false });
+}
+
+function writeTree(strapi, uid, entry, options) {
+  const { keepIds, populated } = options;
   if (!entry) return null;
   const schema = strapi.getModel(uid),
     out = {};
@@ -262,12 +274,14 @@ export function writable(strapi, uid, entry, keepIds = true) {
     if (v === undefined) continue;
     if (attr.type === "component")
       out[name] = attr.repeatable
-        ? (v || []).map((x) => writable(strapi, attr.component, x, keepIds))
-        : writable(strapi, attr.component, v, keepIds);
+        ? (v || []).map((x) => writeTree(strapi, attr.component, x, options))
+        : writeTree(strapi, attr.component, v, options);
     else if (attr.type === "dynamiczone")
       out[name] = (v || []).map((x) =>
-        writable(strapi, x.__component, x, keepIds),
+        writeTree(strapi, x.__component, x, options),
       );
+    else if (!populated && ["relation", "media"].includes(attr.type))
+      out[name] = clone(v);
     else if (attr.type === "relation")
       out[name] = Array.isArray(v)
         ? v.map((x) => x.documentId || x.id)

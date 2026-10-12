@@ -204,6 +204,8 @@
   "changes.missingLinks": "Some linked items need a translation",
   "changes.missingHelp": "Generate again with linked-item translation enabled, or omit optional links. Required missing links must be resolved.",
   "changes.omit": "Omit these optional links in this language",
+  "changes.omitChild": "Omit optional links for {label} in this language",
+  "changes.childMissingHelp": "This linked item has missing localized links. Omit optional links here, or create required translations before generating again.",
   "changes.failed": "Preview could not be generated",
   "changes.match": "Choose the corresponding translated module",
   "changes.later": "Later",
