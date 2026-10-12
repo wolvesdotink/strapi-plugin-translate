@@ -310,12 +310,21 @@ POST /translate/preview/:id/accept
 
 ## Before and after
 
-The fixtures run against Strapi 5.57. These screenshots were captured with the actual Strapi 5.48 admin using a disposable SQLite app and a deterministic translation provider. They do not require an OpenRouter key.
+These screenshots show the current plugin in the Strapi 5.57 admin using a disposable SQLite app and a deterministic translation provider. They do not require an OpenRouter key.
 
-![Before: the existing page editor](docs/screenshots/before-editor.png)
+![Editor before saving source changes](docs/screenshots/before-editor.png)
 ![After: choose modules and languages following a source save](docs/screenshots/after-save-prompt.png)
 ![After: preview one module and its English collection link](docs/screenshots/after-module-preview.png)
 ![After: English content with untouched manual copy](docs/screenshots/after-english-content.png)
+![Review optional missing links on a linked-item preview](docs/screenshots/after-linked-item-preview.png)
+
+<details>
+<summary>Mobile language selection and module preview</summary>
+
+![Mobile: choose modules and languages](docs/screenshots/after-save-prompt-mobile.png)
+![Mobile: review a module translation](docs/screenshots/after-module-preview-mobile.png)
+
+</details>
 
 ## Preview / review before save
 

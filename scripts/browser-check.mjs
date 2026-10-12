@@ -17,6 +17,12 @@ const context = await browser.newContext({
   viewport: { width: 1440, height: 1100 },
 });
 const page = await context.newPage();
+const capture = (target, filename) =>
+  target.screenshot({
+    path: path.join(output, filename),
+    animations: "disabled",
+    caret: "hide",
+  });
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 try {
@@ -51,6 +57,13 @@ try {
   await page.getByRole("button", { name: "Save", exact: true }).waitFor();
   await page.getByRole("button", { name: /Featured articles -/ }).click();
   const title = page.locator('input[name="modules.1.title"]');
+  await title.waitFor();
+  await page
+    .getByText("Save a source change to translate only the updated content.", {
+      exact: true,
+    })
+    .waitFor();
+  await capture(page, "before-editor.png");
   await title.fill("Entdecke unsere neuesten Reisetipps");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByRole("dialog").waitFor({ timeout: 20000 });
@@ -69,7 +82,8 @@ try {
       button.getAttribute("aria-disabled") !== "true"
     );
   });
-  await page.screenshot({ path: path.join(output, "after-save-prompt.png") });
+  await page.getByText(/^Estimated scope:/).waitFor();
+  await capture(page, "after-save-prompt.png");
   const mobile = await page.context().newPage();
   await mobile.setViewportSize({ width: 390, height: 844 });
   await mobile.goto(
@@ -100,9 +114,8 @@ try {
       button.getAttribute("aria-disabled") !== "true"
     );
   });
-  await mobile.screenshot({
-    path: path.join(output, "after-save-prompt-mobile.png"),
-  });
+  await mobile.getByText(/^Estimated scope:/).waitFor();
+  await capture(mobile, "after-save-prompt-mobile.png");
   await mobile
     .getByRole("button", { name: "Preview translations", exact: true })
     .click();
@@ -115,9 +128,7 @@ try {
       .evaluate((el) => el.scrollWidth <= el.clientWidth),
     true,
   );
-  await mobile.screenshot({
-    path: path.join(output, "after-module-preview-mobile.png"),
-  });
+  await capture(mobile, "after-module-preview-mobile.png");
   await mobile
     .getByRole("dialog")
     .getByRole("button", { name: "Close", exact: true })
@@ -129,9 +140,7 @@ try {
   await page
     .getByText("Discover our latest travel tips", { exact: true })
     .waitFor({ timeout: 20000 });
-  await page.screenshot({
-    path: path.join(output, "after-module-preview.png"),
-  });
+  await capture(page, "after-module-preview.png");
   await page
     .getByRole("button", { name: "Apply en changes", exact: true })
     .click();
@@ -161,9 +170,7 @@ try {
   );
   await page.getByRole("button", { name: /Featured articles -/ }).click();
   await page.locator('input[name="modules.1.title"]').waitFor();
-  await page.screenshot({
-    path: path.join(output, "after-english-content.png"),
-  });
+  await capture(page, "after-english-content.png");
   await page.goto(
     `${base}/admin/content-manager/collection-types/api::page.page/${documentId}?plugins[i18n][locale]=de`,
   );
@@ -285,6 +292,8 @@ try {
   });
   assert.equal(await applyChild.isDisabled(), true);
   await childOmission.check();
+  await childOmission.scrollIntoViewIfNeeded();
+  await capture(page, "after-linked-item-preview.png");
   const acceptance = page.waitForRequest(
     (request) =>
       request.url().includes("/accept") && request.method() === "POST",
