@@ -144,9 +144,15 @@ export default ({ strapi }) => {
         field.after = relations
           .filter((r) => r.fieldKey === field.id)
           .map((r) =>
-            r.status === "missing"
-              ? `Missing ${r.targetLocale} version`
-              : `${r.label} (${r.targetLocale})`,
+            r.status !== "missing"
+              ? `${r.label} (${r.targetLocale})`
+              : children.some(
+                    (c) =>
+                      c.prepared.uid === r.uid &&
+                      c.prepared.documentId === r.documentId,
+                  )
+                ? `${r.label} (${r.targetLocale}, new)`
+                : `${r.label} (missing in ${r.targetLocale})`,
           );
       }
     const row = {

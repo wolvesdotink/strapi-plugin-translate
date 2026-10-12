@@ -63,8 +63,21 @@ export default ({ strapi }) => ({
               fields: ["documentId"],
             })
           : rows;
+      // Items without a target-language version are labelled from the
+      // source language rather than shown as bare document IDs.
+      const missing = [...ids].filter(
+        (id) => !rows.some((r) => r.documentId === id),
+      );
+      const sourceRows = missing.length
+        ? await strapi.documents(uid).findMany({
+            locale: prepared.sourceLocale,
+            status: "draft",
+            filters: { documentId: { $in: missing } },
+          })
+        : [];
       available.set(uid, {
         rows: new Map(rows.map((r) => [r.documentId, r])),
+        sourceRows: new Map(sourceRows.map((r) => [r.documentId, r])),
         published: new Set(published.map((r) => r.documentId)),
       });
     }
@@ -81,8 +94,9 @@ export default ({ strapi }) => ({
       if (!path) continue;
       const ids = [];
       for (const id of sourceIds) {
-        const { rows, published } = available.get(f.target);
+        const { rows, sourceRows, published } = available.get(f.target);
         const entry = rows.get(id);
+        const fallback = sourceRows.get(id);
         const decision = {
           path: path.join("."),
           fieldKey: f.key,
@@ -90,7 +104,12 @@ export default ({ strapi }) => ({
           uid: f.target,
           documentId: id,
           targetLocale: prepared.targetLocale,
-          label: entry?.title || entry?.name || id,
+          label:
+            entry?.title ||
+            entry?.name ||
+            fallback?.title ||
+            fallback?.name ||
+            id,
           status: entry
             ? published.has(id)
               ? "available"

@@ -239,7 +239,7 @@ Update rules reuse the selective engine after saved change tracking commits. Whe
 
 ## Translate only saved changes
 
-The new **Translation changes** panel complements the existing full-document action. Save an edit in your source language to open **Translate saved changes**. Choose the changed modules and one or more languages, generate previews, review each language, and apply its approved changes. **Later** keeps pending work available in the panel. A language skipped on one save still receives its earlier unapplied changes when selected later.
+The new **Translation changes** panel complements the existing full-document action. Save an edit in your source language to open **Translate saved changes**. Choose the changed modules and one or more languages, generate previews, review each language, and apply its approved changes. **Not now** keeps pending work available in the panel, which lists the changed modules and reopens the dialog with **Translate changes**. A language skipped on one save still receives its earlier unapplied changes when selected later.
 
 The popup is enabled for `settings.sourceLocale` (German by default). Configure its scope in `config/plugins.js`:
 
@@ -268,7 +268,7 @@ For component arrays and dynamic zones, applying a patch may submit the complete
 
 Relations marked `copy` in affected modules are checked for the same `documentId` in the target locale. For example, a German article and its English version share a logical document ID: the resolver checks English availability and writes the relation for the English page. Relation ordering and removals are retained. Collections without localization and media use shared references; `skip` relations remain untouched.
 
-By default, article content is preserved and the existing localized item is linked. **Also translate pending changes to linked items** adds separate previews for changed direct children and missing localized versions. Child translations are applied before the parent link, in the same transaction for that language. Only changed child fields are translated when a baseline exists. The first release limits propagation to direct children, deduplicates repeated links, and avoids recursive graph translation.
+By default, article content is preserved and the existing localized item is linked. **Also translate linked items** adds separate previews for changed direct children and missing localized versions. Child translations are applied before the parent link, in the same transaction for that language. Only changed child fields are translated when a baseline exists. The first release limits propagation to direct children, deduplicates repeated links, and avoids recursive graph translation.
 
 Missing optional localized items can be omitted with explicit review, or created using the linked-item option. Each linked-item preview has its own omission approval for its optional missing links; approving the page's omissions does not approve its children's omissions. Unresolved required relations block acceptance. Draft-only localized items are flagged in the preview; applying a page draft does not publish its articles.
 
@@ -280,7 +280,7 @@ Tracking snapshots, mappings, baselines, and scoped previews are stored in the p
 
 Changes are saved as drafts where Draft & Publish is enabled. For content types without drafts, applying changes affects live content. Previews show CMS module content; an exact frontend-rendered preview or website cache revalidation remains a host-site integration.
 
-The initial before-save source snapshot becomes the baseline for existing translations. Duplicate modules need reviewed alignment; use a deliberate full translation to establish a complete baseline if their prior correspondence is unknown. A page language that does not yet exist requires an explicit **initial full translation**, rather than an incomplete patch.
+The initial before-save source snapshot becomes the baseline for existing translations. Duplicate modules need reviewed alignment; use a deliberate full translation to establish a complete baseline if their prior correspondence is unknown. A page language that does not yet exist is marked **Not created yet** in the language picker and requires **Create missing languages**, which previews a full initial translation rather than an incomplete patch.
 
 ### Scoped API
 
@@ -316,6 +316,7 @@ These screenshots show the current plugin in the Strapi 5.57 admin using a dispo
 ![After: choose modules and languages following a source save](docs/screenshots/after-save-prompt.png)
 ![After: preview one module and its English collection link](docs/screenshots/after-module-preview.png)
 ![After: English content with untouched manual copy](docs/screenshots/after-english-content.png)
+![After: a French link that has no localized item yet must be resolved or explicitly omitted](docs/screenshots/after-missing-link.png)
 ![Review optional missing links on a linked-item preview](docs/screenshots/after-linked-item-preview.png)
 
 <details>

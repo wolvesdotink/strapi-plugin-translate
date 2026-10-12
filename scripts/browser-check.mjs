@@ -59,9 +59,12 @@ try {
   const title = page.locator('input[name="modules.1.title"]');
   await title.waitFor();
   await page
-    .getByText("Save a source change to translate only the updated content.", {
-      exact: true,
-    })
+    .getByText(
+      "No pending changes. Save an edit to translate just the modules you changed.",
+      {
+        exact: true,
+      },
+    )
     .waitFor();
   await capture(page, "before-editor.png");
   await title.fill("Entdecke unsere neuesten Reisetipps");
@@ -82,7 +85,7 @@ try {
       button.getAttribute("aria-disabled") !== "true"
     );
   });
-  await page.getByText(/^Estimated scope:/).waitFor();
+  await page.getByText(/^Estimated usage/).waitFor();
   await capture(page, "after-save-prompt.png");
   const mobile = await page.context().newPage();
   await mobile.setViewportSize({ width: 390, height: 844 });
@@ -93,7 +96,7 @@ try {
     .getByRole("button", { name: "Open more actions", exact: true })
     .click();
   await mobile
-    .getByRole("button", { name: "Review saved changes", exact: true })
+    .getByRole("button", { name: "Translate changes", exact: true })
     .click();
   await mobile.getByRole("checkbox", { name: /^English/ }).check();
   const promptBounds = await mobile.getByRole("dialog").boundingBox();
@@ -114,7 +117,7 @@ try {
       button.getAttribute("aria-disabled") !== "true"
     );
   });
-  await mobile.getByText(/^Estimated scope:/).waitFor();
+  await mobile.getByText(/^Estimated usage/).waitFor();
   await capture(mobile, "after-save-prompt-mobile.png");
   await mobile
     .getByRole("button", { name: "Preview translations", exact: true })
@@ -141,12 +144,8 @@ try {
     .getByText("Discover our latest travel tips", { exact: true })
     .waitFor({ timeout: 20000 });
   await capture(page, "after-module-preview.png");
-  await page
-    .getByRole("button", { name: "Apply en changes", exact: true })
-    .click();
-  await page
-    .getByText("Changes applied", { exact: true })
-    .waitFor({ timeout: 15000 });
+  await page.getByRole("button", { name: /^Apply to English/ }).click();
+  await page.getByText(/^English.* updated$/).waitFor({ timeout: 15000 });
   const targetResponse = await page.request.get(
     `${base}/content-manager/collection-types/api::page.page/${documentId}?locale=en`,
     { headers },
@@ -163,7 +162,7 @@ try {
   );
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Close", exact: true })
+    .getByRole("button", { name: "Done", exact: true })
     .click();
   await page.goto(
     `${base}/admin/content-manager/collection-types/api::page.page/${documentId}?plugins[i18n][locale]=en`,
@@ -189,34 +188,29 @@ try {
   await page
     .getByText("[en] Aktuelle Reiseinspiration", { exact: true })
     .waitFor({ timeout: 20000 });
-  await page.getByRole("button", { name: "French", exact: true }).click();
+  await page.getByRole("tab", { name: /^French/ }).click();
   await page
     .getByText("[fr] Aktuelle Reiseinspiration", { exact: true })
     .waitFor();
+  await capture(page, "after-missing-link.png");
   assert.equal(
-    await page
-      .getByRole("button", { name: "Apply fr changes", exact: true })
-      .isDisabled(),
+    await page.getByRole("button", { name: /^Apply to French/ }).isDisabled(),
     true,
   );
   await page
     .getByRole("checkbox", {
-      name: "Omit these optional links in this language",
+      name: "Apply without these links",
       exact: true,
     })
     .check();
-  await page
-    .getByRole("button", { name: "Apply fr changes", exact: true })
-    .click();
-  await page.getByText("Changes applied", { exact: true }).waitFor();
-  await page.getByRole("button", { name: /^English/ }).click();
-  await page
-    .getByRole("button", { name: "Apply en changes", exact: true })
-    .click();
-  await page.getByText("Changes applied", { exact: true }).waitFor();
+  await page.getByRole("button", { name: /^Apply to French/ }).click();
+  await page.getByText(/^French.* updated$/).waitFor();
+  await page.getByRole("tab", { name: /^English/ }).click();
+  await page.getByRole("button", { name: /^Apply to English/ }).click();
+  await page.getByText(/^English.* updated$/).waitFor();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Close", exact: true })
+    .getByRole("button", { name: "Done", exact: true })
     .click();
 
   // A linked child needs a separate approval to omit its own missing links.
@@ -268,13 +262,13 @@ try {
     `${base}/admin/content-manager/collection-types/api::page.page/${documentId}?plugins[i18n][locale]=de`,
   );
   await page
-    .getByRole("button", { name: "Review saved changes", exact: true })
+    .getByRole("button", { name: "Translate changes", exact: true })
     .click();
   await page.getByRole("checkbox", { name: /^English/ }).uncheck();
   await page.getByRole("checkbox", { name: "French", exact: true }).check();
   await page
     .getByRole("checkbox", {
-      name: "Also translate pending changes to linked items",
+      name: "Also translate linked items",
       exact: true,
     })
     .check();
@@ -282,14 +276,11 @@ try {
     .getByRole("button", { name: "Preview translations", exact: true })
     .click();
   const childOmission = page.getByRole("checkbox", {
-    name: "Omit optional links for Review article A in this language",
+    name: "Apply Review article A without these links",
     exact: true,
   });
   await childOmission.waitFor({ timeout: 20000 });
-  const applyChild = page.getByRole("button", {
-    name: "Apply fr changes",
-    exact: true,
-  });
+  const applyChild = page.getByRole("button", { name: /^Apply to French/ });
   assert.equal(await applyChild.isDisabled(), true);
   await childOmission.check();
   await childOmission.scrollIntoViewIfNeeded();
@@ -304,7 +295,7 @@ try {
     true,
   ]);
   assert.equal(acceptedBody.allowMissingRelations, false);
-  await page.getByText("Changes applied", { exact: true }).waitFor();
+  await page.getByText(/^French.* updated$/).waitFor();
   const childResponse = await page.request.get(
     `${base}/content-manager/collection-types/api::article.article/${articleA.documentId}?locale=fr`,
     { headers },

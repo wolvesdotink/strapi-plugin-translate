@@ -27,13 +27,19 @@ const ChangesPanelContent = ({ model, documentId, document, activeTab }) => {
   useEffect(() => {
     if (isSubmitting) submitting.current = true;
   }, [isSubmitting]);
-  const refresh = async (prompt = false) => {
+  // `prompt` opens the dialog after the editor's own save; `isCancelled`
+  // drops responses for a document the panel no longer shows.
+  const refresh = async ({
+    prompt = false,
+    isCancelled = () => false,
+  } = {}) => {
     try {
       const { data } = await post("/translate/changes", {
         uid: model,
         documentId,
         sourceLocale,
       });
+      if (isCancelled()) return;
       setChanges(data);
       setError(null);
       if (
@@ -46,7 +52,8 @@ const ChangesPanelContent = ({ model, documentId, document, activeTab }) => {
         setOpen(true);
       }
     } catch (err) {
-      setError(err?.response?.data?.error?.message || err.message);
+      if (!isCancelled())
+        setError(err?.response?.data?.error?.message || err.message);
     }
   };
   useEffect(() => {
@@ -62,62 +69,65 @@ const ChangesPanelContent = ({ model, documentId, document, activeTab }) => {
     let cancelled = false;
     // Wait for the refreshed document after the save. The source snapshot and
     // tracking record commit together; no click interception or DOM observers.
-    const fetch = async () => {
-      try {
-        const { data } = await post("/translate/changes", {
-          uid: model,
-          documentId,
-          sourceLocale,
-        });
-        if (cancelled) return;
-        setChanges(data);
-        setError(null);
-        if (
-          prompt &&
-          data.shouldPrompt &&
-          data.modules.length &&
-          data.revision !== seen.current
-        ) {
-          seen.current = data.revision;
-          setOpen(true);
-        }
-      } catch (err) {
-        if (!cancelled)
-          setError(err?.response?.data?.error?.message || err.message);
-      }
-    };
-    fetch();
+    refresh({ prompt, isCancelled: () => cancelled });
     return () => {
       cancelled = true;
     };
   }, [model, documentId, sourceLocale, document?.updatedAt, activeTab, post]);
   if (activeTab === "published" || changes?.enabled === false) return null;
+  const pending = changes?.modules || [];
+  const shown = pending.slice(0, 3);
   return (
     <Flex direction="column" alignItems="stretch" gap={3}>
-      <Typography variant="pi" textColor={error ? "danger600" : "neutral600"}>
-        {error ||
-          (changes?.modules?.length
-            ? t(
-                "pending",
-                "{count, plural, one {# module has} other {# modules have}} pending changes",
-                { count: changes.modules.length },
-              )
-            : t(
-                "none",
-                "Save a source change to translate only the updated content.",
-              ))}
-      </Typography>
-      <Button
-        variant="secondary"
-        disabled={!changes?.modules?.length}
-        onClick={() => setOpen(true)}
-      >
-        {t("review", "Review saved changes")}
-      </Button>
-      {error && (
-        <Button variant="tertiary" onClick={() => refresh()}>
+      {error ? (
+        <Typography variant="pi" textColor="danger600">
+          {error}
+        </Typography>
+      ) : pending.length ? (
+        <Flex direction="column" alignItems="stretch" gap={1}>
+          <Typography variant="pi" fontWeight="bold" textColor="neutral800">
+            {t(
+              "pending",
+              "{count, plural, one {# module changed} other {# modules changed}} since the last translation",
+              { count: pending.length },
+            )}
+          </Typography>
+          {shown.map((module) => (
+            <Typography
+              key={module.key}
+              variant="pi"
+              textColor="neutral600"
+              ellipsis
+            >
+              {module.label}
+            </Typography>
+          ))}
+          {pending.length > shown.length && (
+            <Typography variant="pi" textColor="neutral500">
+              {t("more", "and {count} more", {
+                count: pending.length - shown.length,
+              })}
+            </Typography>
+          )}
+        </Flex>
+      ) : (
+        <Typography variant="pi" textColor="neutral600">
+          {t(
+            "none",
+            "No pending changes. Save an edit to translate just the modules you changed.",
+          )}
+        </Typography>
+      )}
+      {error ? (
+        <Button variant="tertiary" fullWidth onClick={() => refresh()}>
           {t("retry", "Retry")}
         </Button>
+      ) : (
+        pending.length > 0 && (
+          <Button variant="secondary" fullWidth onClick={() => setOpen(true)}>
+            {t("review", "Translate changes")}
+          </Button>
+        )
       )}
       {open && (
         <ChangesModal
