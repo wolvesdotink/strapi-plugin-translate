@@ -1,3 +1,5 @@
+import { fingerprint } from "../services/content-tree";
+
 // HTTP-facing controller for the translate plugin. Mounted under /translate/...
 // All routes are admin-scoped (require an authenticated admin user).
 //
@@ -12,6 +14,104 @@
 
 const READ_ACTION = "plugin::content-manager.explorer.read";
 const UPDATE_ACTION = "plugin::content-manager.explorer.update";
+
+const isScoped = id => typeof id === "string" && id.startsWith("change_");
+const fail = (ctx, err) => {
+  ctx.status = err.status || 500;
+  ctx.body = { error: { name: "TranslationError", message: err.message, details: err.details || {} } };
+};
+
+const permissionField = (strapi, uid, path) => {
+  const parts = [];
+  let model = uid;
+  for (const segment of path) {
+    if (typeof segment === "number") continue;
+    parts.push(segment);
+    const attr = strapi.getModel(model)?.attributes?.[segment];
+    // Strapi grants dynamic-zone permissions for the container, rather than
+    // each concrete component type's leaves. Components use nested fields.
+    if (attr?.type === "dynamiczone") break;
+    if (attr?.type === "component") model = attr.component;
+  }
+  return parts.join(".");
+};
+
+const authorizeChanges = (strapi, ctx) => async (prepared) => {
+  const checker = strapi
+    .plugin("content-manager")
+    .service("permission-checker")
+    .create({ userAbility: ctx.state.userAbility, model: prepared.uid });
+  const createSubject = { locale: prepared.targetLocale };
+  if (
+    checker.cannot.read(prepared.source) ||
+    (prepared.target
+      ? checker.cannot.read(prepared.target) ||
+        checker.cannot.update(prepared.target)
+      : checker.cannot.create(createSubject))
+  ) {
+    throw Object.assign(
+      new Error("Missing permission for this document or language."),
+      { status: 403 },
+    );
+  }
+  for (const op of prepared.ops) {
+    const field = permissionField(strapi, prepared.uid, op.path);
+    if (
+      checker.cannot.read(prepared.source, field) ||
+      (prepared.target
+        ? checker.cannot.read(prepared.target, field) ||
+          checker.cannot.update(prepared.target, field)
+        : checker.cannot.create(createSubject, field))
+    ) {
+      throw Object.assign(new Error(`Missing permission for field ${field}.`), {
+        status: 403,
+      });
+    }
+  }
+  if (prepared.proposed) {
+    const sanitized = prepared.target
+      ? await checker.sanitizeUpdateInput(prepared.target)(prepared.proposed)
+      : await checker.sanitizeCreateInput(prepared.proposed);
+    if (fingerprint(sanitized) !== fingerprint(prepared.proposed))
+      throw Object.assign(
+        new Error("The selected module contains fields you cannot update."),
+        { status: 403 },
+      );
+  }
+  const relations = Object.values(prepared.current.fields).filter(
+    (f) =>
+      f.type === "relation" &&
+      (prepared.initialTranslation ||
+        prepared.ops.some((op) => op.moduleKey === f.moduleKey)),
+  );
+  for (const ref of relations) {
+    if (!strapi.getModel(ref.target)?.pluginOptions?.i18n?.localized) continue;
+    const relatedChecker = strapi
+      .plugin("content-manager")
+      .service("permission-checker")
+      .create({ userAbility: ctx.state.userAbility, model: ref.target });
+    for (const documentId of Array.isArray(ref.value)
+      ? ref.value
+      : ref.value
+        ? [ref.value]
+        : []) {
+      for (const locale of [prepared.sourceLocale, prepared.targetLocale]) {
+        const entry = await strapi
+          .documents(ref.target)
+          .findOne({ documentId, locale, status: "draft" });
+        if (
+          entry &&
+          (relatedChecker.cannot.read(entry) ||
+            (entry.title && relatedChecker.cannot.read(entry, "title")))
+        )
+          throw Object.assign(
+            new Error("Missing read permission for a linked item."),
+            { status: 403 },
+          );
+      }
+    }
+  }
+};
 
 const emptyFormatProgress = () => ({
   plain: { done: 0, total: 0 },
@@ -424,8 +524,24 @@ export default ({ strapi }) => {
       const { id } = ctx.params;
       const snapshot = jobs().get(id);
       if (!snapshot) return ctx.notFound("job not found");
+      if (snapshot.source === "preview" && snapshot.userId !== ctx.state?.user?.id) return ctx.notFound("job not found");
       if (snapshot.uid && !userCanOrDeny(ctx, snapshot.uid, READ_ACTION)) {
         return ctx.notFound("job not found");
+      }
+      if (snapshot.source === "preview") {
+        try {
+          const selective = strapi.plugin("translate").service("selective-preview");
+          for (const target of snapshot.targets) {
+            if (!target.result?.previewId) continue;
+            const row = await selective.get(target.result.previewId, ctx.state.user.id);
+            if (!row) {
+              // A discarded/expired preview cannot authorize its cached text.
+              return ctx.notFound("preview expired or not found");
+            }
+            await authorizeChanges(strapi, ctx)(row.prepared);
+            for (const child of row.children) await authorizeChanges(strapi, ctx)(child.prepared);
+          }
+        } catch { return ctx.notFound("job not found"); }
       }
       ctx.body = snapshot;
     },
@@ -449,7 +565,8 @@ export default ({ strapi }) => {
       });
       // Fail closed: when userAbility is missing, return no jobs rather than
       // leaking the registry.
-      const filtered = all.filter((j) => userCanOrDeny(ctx, j.uid, READ_ACTION));
+      const filtered = all.filter((j) => userCanOrDeny(ctx, j.uid, READ_ACTION) && (j.source !== "preview" || j.userId === ctx.state?.user?.id))
+        .map(j => j.source === "preview" ? { ...j, targets: j.targets.map(target => ({ ...target, result: target.result ? { previewId: target.result.previewId, warnings: target.result.warnings || [] } : null })) } : j);
       ctx.body = {
         jobs: filtered.slice(0, limit),
         total: filtered.length,
@@ -463,6 +580,7 @@ export default ({ strapi }) => {
       const { id } = ctx.params;
       const snapshot = jobs().get(id);
       if (!snapshot) return ctx.notFound("job not found");
+      if (snapshot.source === "preview" && snapshot.userId !== ctx.state?.user?.id) return ctx.notFound("job not found");
       if (snapshot.uid && !userCanOrDeny(ctx, snapshot.uid, UPDATE_ACTION)) {
         return ctx.notFound("job not found");
       }
@@ -528,6 +646,10 @@ export default ({ strapi }) => {
         }
       }
       try {
+        if (body.mode === "changes") {
+          ctx.body = await strapi.plugin("translate").service("selective-preview").estimate({ ...body, sourceLocale: sourceLocale || strapi.plugin("translate").config.sourceLocale }, authorizeChanges(strapi, ctx));
+          return;
+        }
         const est = await translate().estimate({
           uid,
           documentId,
@@ -588,12 +710,32 @@ export default ({ strapi }) => {
       ctx.body = value;
     },
 
-    /**
-     * POST /translate/preview
-     * body: { uid, documentId, sourceLocale?, targetLocale }
-     * Runs the translation but does NOT commit; returns a previewId + diff.
-     */
+    /** POST /translate/changes — persisted, permission-checked pending work. */
+    async getChanges(ctx) {
+      const body = ctx.request.body || {};
+      const sourceLocale = body.sourceLocale || strapi.plugin("translate").config.sourceLocale;
+      if (!body.uid || !body.documentId || !sourceLocale) return ctx.badRequest("uid, documentId and sourceLocale are required");
+      try {
+        const changes = strapi.plugin("translate").service("changes");
+        const out = await changes.get({ ...body, sourceLocale, actingUserId: ctx.state.user.id });
+        const source = await changes.load(body.uid, body.documentId, sourceLocale);
+        if (source) {
+          const prepared = { uid: body.uid, sourceLocale, targetLocale: sourceLocale, source, target: source, current: { fields: {} }, ops: out.modules.flatMap(m => m.fields.map(f => ({ path: f.path }))) };
+          await authorizeChanges(strapi, ctx)(prepared);
+        }
+        const checker = strapi.plugin("content-manager").service("permission-checker").create({ userAbility: ctx.state.userAbility, model: body.uid });
+        const targetLocales = [];
+        for (const locale of await localesSvc().codes()) {
+          if (locale === sourceLocale) continue;
+          const target = await changes.load(body.uid, body.documentId, locale);
+          if (target ? checker.can.read(target) && checker.can.update(target) : checker.can.create({ locale })) targetLocales.push(locale);
+        }
+        ctx.body = { ...out, targetLocales };
+      } catch (err) { fail(ctx, err); }
+    },
+
     async createPreview(ctx) {
+      if (ctx.request.body?.mode === "changes") return strapi.plugin("translate").controller("translate").createSelectivePreview(ctx);
       const body = ctx.request.body || {};
       const { uid, documentId, sourceLocale, targetLocale } = body;
       if (!uid || !documentId || !targetLocale) {
@@ -618,10 +760,56 @@ export default ({ strapi }) => {
       }
     },
 
-    /**
-     * GET /translate/preview/:id
-     */
+    /** POST /translate/preview with mode:"changes" — asynchronous locale previews. */
+    async createSelectivePreview(ctx) {
+      const body = ctx.request.body || {};
+      const { uid, documentId } = body;
+      const sourceLocale = body.sourceLocale || strapi.plugin("translate").config.sourceLocale;
+      const supported = await localesSvc().codes();
+      const targets = Array.isArray(body.targetLocales) ? [...new Set(body.targetLocales)] : [];
+      if (!uid || !documentId || !supported.has(sourceLocale) || !targets.length || targets.some(l => !supported.has(l) || l === sourceLocale)) return ctx.badRequest("Choose supported target languages different from the source.");
+      if (body.moduleKeys && (!Array.isArray(body.moduleKeys) || body.moduleKeys.some(k => typeof k !== "string"))) return ctx.badRequest("Invalid module selection");
+      const selective = strapi.plugin("translate").service("selective-preview");
+      const job = jobs().create({ uid, documentId, sourceLocale, targetLocales: targets, userId: ctx.state.user.id, source: "preview" });
+      job.state = "running";
+      const authorize = authorizeChanges(strapi, ctx);
+      (async () => {
+        for (let i = 0; i < job.targets.length; i++) {
+          const target = job.targets[i];
+          if (job.signal.aborted) { target.state = "cancelled"; continue; }
+          target.state = "running"; job.activeTargetIndex = i;
+          try {
+            const result = await selective.create({ uid, documentId, sourceLocale, targetLocale: target.locale,
+              revision: body.revision, moduleKeys: body.moduleKeys, alignments: body.alignments?.[target.locale] || {},
+              initialTranslation: body.initialTranslation === true, translateLinkedItems: body.translateLinkedItems === true,
+              actingUserId: ctx.state.user.id, signal: job.signal,
+              onProgress: ({ format, done, total }) => { target.progress[format] = { done, total }; },
+            }, authorize);
+            target.state = "done"; target.result = result;
+          } catch (err) {
+            target.state = job.signal.aborted ? "cancelled" : "failed";
+            target.error = err.message;
+            target.result = { details: err.details || {}, status: err.status || 500 };
+          }
+        }
+        job.activeTargetIndex = -1; job.state = deriveOverallState(job.targets); job.finishedAt = Date.now();
+        await jobs().persistNow();
+      })().catch(err => { job.state = "failed"; job.error = err.message; job.finishedAt = Date.now(); jobs().persistNow().catch(() => {}); });
+      ctx.status = 202; ctx.body = { jobId: job.id };
+    },
+
     async getPreview(ctx) {
+      if (isScoped(ctx.params.id)) {
+        const selective = strapi.plugin("translate").service("selective-preview");
+        const row = await selective.get(ctx.params.id, ctx.state.user.id);
+        if (!row) return ctx.notFound("preview not found");
+        try {
+          await authorizeChanges(strapi, ctx)(row.prepared);
+          for (const child of row.children) await authorizeChanges(strapi, ctx)(child.prepared);
+          ctx.body = selective.publicPreview(row);
+        } catch (err) { fail(ctx, err); }
+        return;
+      }
       const row = await preview().get(ctx.params.id);
       if (!row) return ctx.notFound("preview not found");
       if (!userCanOnUid(ctx, row.uid, [READ_ACTION])) {
@@ -637,6 +825,12 @@ export default ({ strapi }) => {
      * Commits the proposed payload.
      */
     async acceptPreview(ctx) {
+      if (isScoped(ctx.params.id)) {
+        try {
+          ctx.body = await strapi.plugin("translate").service("selective-preview").accept(ctx.params.id, { ...ctx.request.body, actingUserId: ctx.state.user.id }, authorizeChanges(strapi, ctx));
+        } catch (err) { fail(ctx, err); }
+        return;
+      }
       const row = await preview().get(ctx.params.id);
       if (!row) return ctx.notFound("preview not found");
       if (!userCanOnUid(ctx, row.uid, [READ_ACTION, UPDATE_ACTION])) {
@@ -655,6 +849,11 @@ export default ({ strapi }) => {
      * POST /translate/preview/:id/discard
      */
     async discardPreview(ctx) {
+      if (isScoped(ctx.params.id)) {
+        try { ctx.body = await strapi.plugin("translate").service("selective-preview").discard(ctx.params.id, ctx.state.user.id); }
+        catch (err) { fail(ctx, err); }
+        return;
+      }
       const row = await preview().get(ctx.params.id);
       if (!row) return ctx.notFound("preview not found");
       if (!userCanOnUid(ctx, row.uid, [READ_ACTION, UPDATE_ACTION])) {

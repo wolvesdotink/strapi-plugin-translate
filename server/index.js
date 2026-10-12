@@ -1,6 +1,12 @@
 // Plugin server entry. Registers lifecycle hooks, controllers, services, and routes.
 // This is the shape Strapi v5 expects from a local plugin's server export.
 
+import stateContentType from "./content-types/state";
+import stateService from "./services/state";
+import changesService from "./services/changes";
+import relationsService from "./services/relations";
+import selectivePreviewService from "./services/selective-preview";
+
 import register from "./register";
 import bootstrap from "./bootstrap";
 
@@ -25,6 +31,8 @@ export default {
   register,
   bootstrap,
 
+  contentTypes: { state: stateContentType },
+
   controllers: {
     translate: translateController,
   },
@@ -32,6 +40,10 @@ export default {
   policies,
 
   services: {
+    state: stateService,
+    changes: changesService,
+    relations: relationsService,
+    "selective-preview": selectivePreviewService,
     translate: translateService,
     "translatable-fields": translatableFieldsService,
     format: formatService,

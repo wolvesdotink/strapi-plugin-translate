@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { OpenAI } from "openai";
 import openrouter from "../../server/providers/openrouter.js";
 
 // Build a fake openai client. Each test installs a `respond` function that
@@ -46,6 +47,44 @@ const baseOpts = {
 };
 
 describe("openrouter provider", () => {
+  it("sends structured OpenRouter requests through the installed OpenAI SDK", async () => {
+    const calls = [];
+    const provider = openrouter.init({
+      providerOptions: { ...baseOpts, fallbackModels: ["fallback-model"] },
+      clientFactory: (options) =>
+        new OpenAI({
+          ...options,
+          fetch: async (input, init) => {
+            const request = new Request(input, init);
+            calls.push({
+              url: request.url,
+              headers: request.headers,
+              body: await request.json(),
+            });
+            return new Response(JSON.stringify(okResp(["Hello"])), {
+              headers: { "Content-Type": "application/json" },
+            });
+          },
+        }),
+    });
+    expect(
+      await provider.translate({
+        text: ["Hallo"],
+        sourceLocale: "de",
+        targetLocale: "en",
+        format: "plain",
+      }),
+    ).toEqual(["Hello"]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(calls[0].headers.get("authorization")).toBe("Bearer sk-or-test");
+    expect(calls[0].body.models).toEqual([baseOpts.model, "fallback-model"]);
+    expect(calls[0].body.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: { strict: true },
+    });
+  });
+
   it("translates plain text successfully", async () => {
     const fake = makeFakeClient({ respond: async () => okResp(["Hello", "World"]) });
     const provider = openrouter.init({

@@ -3,6 +3,7 @@
 
 import pluginId from "./pluginId";
 import TranslateAction from "./components/TranslateAction";
+import ChangesPanel from "./components/ChangesPanel";
 
 export default {
   register(app) {
@@ -10,12 +11,6 @@ export default {
       id: pluginId,
       name: "Translate",
     });
-
-    // Inject the document action. Strapi v5 calls this factory with the
-    // current document context; we return a descriptor (icon or button + dialog).
-    app
-      .getPlugin("content-manager")
-      .apis.addDocumentAction((actions) => [...actions, TranslateAction]);
 
     // Register the settings page under Settings → Translate. The Component
     // factory is loaded lazily so the form code only enters the bundle when
@@ -63,7 +58,10 @@ export default {
     );
   },
 
-  bootstrap() {},
+  bootstrap(app) {
+    app.getPlugin("content-manager").apis.addDocumentAction((actions) => [...actions, TranslateAction]);
+    app.getPlugin("content-manager").apis.addEditViewSidePanel([ChangesPanel]);
+  },
 
   async registerTrads({ locales }) {
     const importedTrads = await Promise.all(

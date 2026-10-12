@@ -54,35 +54,40 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "fixture": "node scripts/fixture-app.mjs",
+    "test:integration": "npm run build && node scripts/integration-test.mjs && node scripts/selective-regression-test.mjs",
+    "test:browser": "node scripts/browser-check.mjs"
   },
   "dependencies": {
-    "node-html-parser": "^7.0.0",
-    "openai": "^6.42.0"
+    "node-html-parser": "^9.0.4",
+    "openai": "^7.32.0"
   },
   "devDependencies": {
-    "@strapi/design-system": "^2.2.0",
-    "@strapi/icons": "^2.2.0",
+    "@strapi/design-system": "^2.2.4",
+    "@strapi/icons": "^2.2.4",
     "@strapi/sdk-plugin": "^6.1.1",
-    "@strapi/utils": "^5.48.0",
+    "@strapi/utils": "^5.57.0",
+    "better-sqlite3": "^13.0.3",
+    "playwright": "^1.64.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-intl": "^6.8.9",
-    "react-router-dom": "^6.30.4",
-    "styled-components": "^6.4.2",
+    "react-intl": "^7.1.14",
+    "react-router-dom": "^6.30.6",
+    "styled-components": "^6.5.3",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.8"
+    "vitest": "^5.0.4"
   },
   "peerDependencies": {
-    "@strapi/design-system": "^2.0.0",
-    "@strapi/icons": "^2.0.0",
-    "@strapi/strapi": "^5.0.0",
-    "@strapi/utils": "^5.0.0",
-    "react": "^18.0.0",
-    "react-dom": "^18.0.0",
-    "react-intl": "^6.0.0",
-    "react-router-dom": "^6.0.0",
-    "styled-components": "^6.0.0"
+    "@strapi/design-system": "^2.2.4",
+    "@strapi/icons": "^2.2.4",
+    "@strapi/strapi": "^5.57.0",
+    "@strapi/utils": "^5.57.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-intl": "^7.1.14",
+    "react-router-dom": "^6.30.6",
+    "styled-components": "^6.5.3"
   },
   "strapi": {
     "name": "translate",
@@ -91,6 +96,6 @@
     "description": "AI-powered translation of localized entries via OpenRouter."
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.12.0"
   }
 }

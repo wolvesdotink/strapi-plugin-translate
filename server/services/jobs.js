@@ -41,6 +41,7 @@ const isPersistEnabled = () => {
 
 const snapshot = (job) => ({
   id: job.id,
+  userId: job.userId || null,
   state: job.state,
   progress: job.progress,
   error: job.error || null,
@@ -157,7 +158,7 @@ export default ({ strapi }) => {
           uid: snap.uid,
           documentId: snap.documentId,
           sourceLocale: snap.sourceLocale,
-          userId: null,
+          userId: snap.userId || null,
           targetLocale: snap.targetLocale,
           progress: snap.progress || emptyFormatProgress(),
           result: snap.result || null,

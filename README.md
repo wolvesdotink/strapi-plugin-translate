@@ -5,6 +5,8 @@ AI-powered translation of localized Strapi v5 entries via [OpenRouter](https://o
 ## Features
 
 - **Document Action** in the Edit View — one click to translate the current entry into one or many target locales.
+- **Translate saved changes** — after saving an eligible source edit, select modules and target languages, then review a preview of just those changes. Unchanged target copy and component IDs are preserved.
+- **Localized collection links** — changed modules use the linked item's existing target-language version. Optionally include pending linked-item changes or create missing localized items, with separate previews.
 - **Schema-aware walker** — handles components, dynamic zones, repeatable components, Strapi blocks (rich-text JSON), and CKEditor HTML.
 - **Format-aware prompts** — preserves Markdown, HTML, and Strapi-blocks structure exactly; translates only human-readable text nodes.
 - **Multi-locale batches** — pick several targets at once; they're processed sequentially with a live progress bar.
@@ -16,10 +18,12 @@ AI-powered translation of localized Strapi v5 entries via [OpenRouter](https://o
 
 ## Requirements
 
-- Strapi v5 (`@strapi/strapi` ^5.0.0)
-- Node.js 18+
+- Strapi v5.57 or later (`@strapi/strapi` ^5.57.0)
+- Node.js 22.12+ (development and integration checks use Node 24)
 - An [OpenRouter](https://openrouter.ai) API key
-- The `@strapi/plugin-i18n` plugin enabled (this plugin reads locales from it)
+- The `@strapi/i18n` plugin enabled (this plugin reads locales from it)
+
+The admin dependencies use the latest compatible React 18, React Router 6, and React Intl 7 releases. Strapi's admin requires React 18 and React Router 6; React Intl 8+ uses a separate context that cannot consume Strapi's existing translation provider. TypeScript stays on 5 to satisfy React Intl 7's declared peer range. Other direct dependencies use their latest stable releases.
 
 ## Installation
 
@@ -158,7 +162,7 @@ Edits are stored in `strapi.store` and picked up on the next translation job. "R
 
 ## Supported locales
 
-The plugin reads locales from `@strapi/plugin-i18n` at request time — whatever locales you enable in `Settings → Internationalization` become valid targets. No code change required to add a locale. (If the i18n plugin is unavailable, a small fallback set is used so the plugin still loads.)
+The plugin reads locales from `@strapi/i18n` at request time — whatever locales you enable in `Settings → Internationalization` become valid targets. No code change required to add a locale. (If the i18n plugin is unavailable, a small fallback set is used so the plugin still loads.)
 
 ## Glossary file
 
@@ -192,7 +196,7 @@ All routes are admin-scoped (require an authenticated admin user).
 | GET    | `/translate/jobs/:id`             | Poll job status                                          |
 | POST   | `/translate/jobs/:id/cancel`      | Cancel a job                                             |
 | GET    | `/translate/usage`                | OpenRouter credit usage                                  |
-| GET    | `/translate/locales`              | Locales from `@strapi/plugin-i18n`                       |
+| GET    | `/translate/locales`              | Locales from `@strapi/i18n`                       |
 | GET    | `/translate/settings`             | Voice + glossary                                         |
 | PUT    | `/translate/settings`             | Save voice + glossary                                    |
 | POST   | `/translate/settings/reset`       | Reset to register-time defaults                          |
@@ -231,6 +235,97 @@ module.exports = ({ env }) => ({
 ```
 
 Auto-jobs are flagged `source: "auto"` on the job snapshot for observability.
+Update rules reuse the selective engine after saved change tracking commits. When an update rule applies, the save popup is suppressed to prevent duplicate work. Missing optional localized links require manual review; automatic jobs do not silently use another language or omit them.
+
+## Translate only saved changes
+
+The new **Translation changes** panel complements the existing full-document action. Save an edit in your source language to open **Translate saved changes**. Choose the changed modules and one or more languages, generate previews, review each language, and apply its approved changes. **Not now** keeps pending work available in the panel, which lists the changed modules and reopens the dialog with **Translate changes**. A language skipped on one save still receives its earlier unapplied changes when selected later.
+
+The popup is enabled for `settings.sourceLocale` (German by default). Configure its scope in `config/plugins.js`:
+
+```js
+translate: {
+  enabled: true,
+  config: {
+    // ...providerOptions and settings...
+    selectiveTranslation: {
+      enabled: true,
+      sourceLocales: ['de'],
+      contentTypes: ['api::page.page', 'api::article.article'],
+      maxLinkedItems: 20,
+    },
+  },
+}
+```
+
+Omit `contentTypes` to track all localized content types. Set `enabled: false` or `mode: 'off'` to disable the new workflow. The full-document action remains available. Automatic propagation is configured with `autoTranslate.rules` above, rather than a second automatic-mode setting.
+
+Only fields allowed by the schema's translation directives and localization settings participate. Cleared text and structural changes do not require AI calls. A changed rich-text or blocks field is translated as a coherent field, retaining its formatting. The estimate counts selected fields and any explicitly selected linked-item work.
+
+For component arrays and dynamic zones, applying a patch may submit the complete merged array that Strapi requires. Its untouched children come from the current **target** draft, with their target IDs and manual edits. They are not retranslated. Existing module correspondence uses a persisted mapping, an optional application-defined `translationKey`, or an unambiguous single component type. Duplicate types that cannot be matched require an explicit module selection in the review UI; array position alone is not treated as identity.
+
+### Linked collection items
+
+Relations marked `copy` in affected modules are checked for the same `documentId` in the target locale. For example, a German article and its English version share a logical document ID: the resolver checks English availability and writes the relation for the English page. Relation ordering and removals are retained. Collections without localization and media use shared references; `skip` relations remain untouched.
+
+By default, article content is preserved and the existing localized item is linked. **Also translate linked items** adds separate previews for changed direct children and missing localized versions. Child translations are applied before the parent link, in the same transaction for that language. Only changed child fields are translated when a baseline exists. The first release limits propagation to direct children, deduplicates repeated links, and avoids recursive graph translation.
+
+Missing optional localized items can be omitted with explicit review, or created using the linked-item option. Each linked-item preview has its own omission approval for its optional missing links; approving the page's omissions does not approve its children's omissions. Unresolved required relations block acceptance. Draft-only localized items are flagged in the preview; applying a page draft does not publish its articles.
+
+### Review and persistence
+
+Previews expire after one hour and belong to the editor who generated them. Source edits, target edits, or changed voice/glossary settings invalidate staged output. Acceptance locks document records, checks revisions, and commits the page and approved children with baseline advancement in a transaction. Repeating an accepted preview returns its saved result. A failed apply keeps the preview and pending changes available. If schema validation requires a text repair, the provider stages a revised preview for the editor to review before applying it again.
+
+Tracking snapshots, mappings, baselines, and scoped previews are stored in the plugin's hidden `translate_state` content type, which Strapi creates when loading the plugin. Metadata failures are isolated from source saves by a savepoint; the panel can retry tracking without losing the completed source save. Old job snapshots still use the existing job store and restart recovery.
+
+Changes are saved as drafts where Draft & Publish is enabled. For content types without drafts, applying changes affects live content. Previews show CMS module content; an exact frontend-rendered preview or website cache revalidation remains a host-site integration.
+
+The initial before-save source snapshot becomes the baseline for existing translations. Duplicate modules need reviewed alignment; use a deliberate full translation to establish a complete baseline if their prior correspondence is unknown. A page language that does not yet exist is marked **Not created yet** in the language picker and requires **Create missing languages**, which previews a full initial translation rather than an incomplete patch.
+
+### Scoped API
+
+```text
+POST /translate/changes
+  { uid, documentId, sourceLocale, targetLocale? }
+  -> { revision, modules, targetLocales, shouldPrompt }
+
+POST /translate/preview
+  { mode: "changes", uid, documentId, sourceLocale, revision,
+    targetLocales, moduleKeys?, alignments?,
+    translateLinkedItems?, initialTranslation? }
+  -> 202 { jobId }
+
+GET /translate/jobs/:id
+  -> targets[].result { previewId, modules, relations, children }
+
+POST /translate/preview/:id/accept
+  { excludedOperations?, childExcludedOperations?, allowMissingRelations?,
+    childAllowMissingRelations? }
+  -> { ok, documentId, locale, linkedItems }
+```
+
+`childAllowMissingRelations` maps child preview IDs to explicit boolean omission approvals. Required links cannot be omitted.
+
+`POST /translate/estimate` also accepts `mode: "changes"` and the same source/module/language selection. `alignments` is a map per target locale of source module keys to target module keys. The server validates selections against persisted snapshots. Scoped preview IDs begin with `change_`; the legacy single-language preview API remains supported.
+
+## Before and after
+
+These screenshots show the current plugin in the Strapi 5.57 admin using a disposable SQLite app and a deterministic translation provider. They do not require an OpenRouter key.
+
+![Editor before saving source changes](docs/screenshots/before-editor.png)
+![After: choose modules and languages following a source save](docs/screenshots/after-save-prompt.png)
+![After: preview one module and its English collection link](docs/screenshots/after-module-preview.png)
+![After: English content with untouched manual copy](docs/screenshots/after-english-content.png)
+![After: a French link that has no localized item yet must be resolved or explicitly omitted](docs/screenshots/after-missing-link.png)
+![Review optional missing links on a linked-item preview](docs/screenshots/after-linked-item-preview.png)
+
+<details>
+<summary>Mobile language selection and module preview</summary>
+
+![Mobile: choose modules and languages](docs/screenshots/after-save-prompt-mobile.png)
+![Mobile: review a module translation](docs/screenshots/after-module-preview-mobile.png)
+
+</details>
 
 ## Preview / review before save
 
@@ -251,7 +346,22 @@ providers.register("your-provider", require("./your-provider"));
 npm test          # vitest
 npm run verify    # plugin loads + tests
 npm run typecheck # tsc --noEmit (JSDoc-level)
+npm run test:integration # build, then exercise real Strapi + SQLite
 ```
+
+The integration fixtures test component identity (including independently ordered nested children), localized nested relations, pending-language state, idempotent and concurrent acceptance, stale previews, metadata recovery, linked-item updates, and automatic propagation. They also exercise the real controllers with locale/field-restricted Strapi abilities, initial creation by ordinary editors, and separate optional-link approval for children. Development integration checks use Node 24 and `better-sqlite3`; no production dependency is added.
+
+To reproduce admin checks and screenshots:
+
+```sh
+npm run build
+npm run fixture -- build /tmp/translate-strapi-fixture
+TRANSLATE_FIXTURE_PORT=1348 npm run fixture -- start /tmp/translate-strapi-fixture
+# In another terminal; CHROME_PATH can override /usr/bin/google-chrome:
+npm run test:browser
+```
+
+The disposable fixture account is `translate-fixture@example.test` / `FixtureOnly123!`. This fixture creates only local sample data, uses a fake translation provider, and is not intended for deployment. Use a fresh fixture directory for a repeatable browser test. The HTML proposal is in [docs/plugin-improvement-plan.html](docs/plugin-improvement-plan.html).
 
 ## License
 

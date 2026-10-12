@@ -174,13 +174,14 @@ const walkAttribute = ({
   bag,
   fieldsService,
 }) => {
+  if (attrDescriptor.directive === "skip") return;
   if (value == null) return;
 
   const { name, type, directive } = attrDescriptor;
   const labelPath = pathPrefix.concat(name).join(".");
 
-  // Skip / copy: write the value through verbatim.
-  if (directive === "skip" || directive === "copy") {
+  // Copy explicit pass-through values; skip has already returned.
+  if (directive === "copy") {
     if (type === "relation") {
       // For relations marked copy: connect by document id (Strapi v5 connect form)
       const target = attrDescriptor.target;
@@ -469,6 +470,8 @@ export default ({ strapi }) => {
     // Used by translateDocument (which then upserts), translateDocumentDry
     // (preview flow), and the back-translate sanity check.
     async _compute({
+      selectedPaths,
+      sourceEntry,
       uid,
       documentId,
       sourceLocale,
@@ -512,7 +515,7 @@ export default ({ strapi }) => {
 
       // 1. Fetch source entry deeply populated
       const populate = fieldsService.buildPopulate(uid);
-      const source = await strapi.documents(uid).findOne({
+      const source = sourceEntry || await strapi.documents(uid).findOne({
         documentId,
         locale: sourceLocale,
         populate,
@@ -540,6 +543,14 @@ export default ({ strapi }) => {
           bag,
           fieldsService,
         });
+      }
+
+      if (selectedPaths) {
+        const selected = new Set(selectedPaths);
+        for (const format of ["plain", "html", "blocks"]) {
+          bag[format] = bag[format].filter(item => selected.has(item.path.join(".")));
+        }
+        bag.relations = bag.relations.filter(ref => selected.has(ref.label));
       }
 
       // 2a. Preflight: verify every relation/media we're about to send still
@@ -799,6 +810,7 @@ export default ({ strapi }) => {
         translatedPaths: [
           ...bag.plain.map((it) => it.path.join(".")),
           ...bag.html.map((it) => it.path.join(".")),
+          ...bag.blocks.map((it) => it.path.join(".")),
         ],
       };
     },
@@ -831,7 +843,8 @@ export default ({ strapi }) => {
           );
         }
       }
-      const entry = await this.commitPreview(computed, {
+      const state = strapi.plugin("translate").service("state");
+      const commit = () => this.commitPreview(computed, {
         signal: args?.signal,
         onRepair: (repairs) => {
           for (const r of repairs) {
@@ -845,6 +858,9 @@ export default ({ strapi }) => {
           }
         },
       });
+      const entry = await (state ? state.runTranslation(commit) : commit());
+      const changes = strapi.plugin("translate").service("changes");
+      if (changes) await changes.recordFull({ ...args, sourceLocale: args.sourceLocale || config().sourceLocale });
       return { entry, warnings };
     },
 
@@ -898,6 +914,9 @@ export default ({ strapi }) => {
      * @param {string[]} [args.translatedPaths] dot-joined paths the LLM wrote;
      *   when present, repair is restricted to these fields.
      * @param {object} [opts]
+     * @param {boolean} [opts.allowRepair]
+     * @param {boolean} [opts.preserveWorkflow]
+     * @param {boolean} [opts.reviewRepairs]
      * @param {AbortSignal} [opts.signal]
      * @param {(repairs: Array<{path: string, message: string, before: string, after: string}>) => void} [opts.onRepair]
      */
@@ -946,7 +965,7 @@ export default ({ strapi }) => {
         if (resolvedStamping.createdBy && resolvedUserId) data.createdBy = resolvedUserId;
         if (resolvedStamping.updatedBy && resolvedUserId) data.updatedBy = resolvedUserId;
       }
-      if (resolvedAttrs.strapi_assignee) {
+      if (resolvedAttrs.strapi_assignee && !opts.preserveWorkflow) {
         data.strapi_assignee = null;
       }
 
@@ -962,7 +981,7 @@ export default ({ strapi }) => {
       // plus the exact validation messages back to the provider so it can
       // regenerate them (e.g. a shorter title with the same meaning), then
       // retry the save. Two repair rounds, then the original error surfaces.
-      const MAX_REPAIR_ROUNDS = 2;
+      const MAX_REPAIR_ROUNDS = opts.allowRepair === false ? 0 : 2;
       const repairablePathSet = Array.isArray(translatedPaths)
         ? new Set(translatedPaths)
         : null;
@@ -1032,6 +1051,9 @@ export default ({ strapi }) => {
           // Provider returned every text unchanged — retrying the same
           // payload can only fail the same way.
           if (repairs.length === 0) throw err;
+          if (opts.reviewRepairs) {
+            throw Object.assign(new Error("Translation adjusted for validation. Review the revised preview before applying."), { status: 409, repairs });
+          }
           if (typeof opts.onRepair === "function") {
             try {
               opts.onRepair(repairs);
@@ -1054,7 +1076,7 @@ export default ({ strapi }) => {
      * calls provider.estimate() per format group. Multiplied by the number
      * of target locales (each locale is an independent provider call).
      */
-    async estimate({ uid, documentId, sourceLocale, targetLocales }) {
+    async estimate({ uid, documentId, sourceLocale, targetLocales, selectedPaths, sourceEntry }) {
       if (!uid) throw new Error("uid is required");
       if (!documentId) throw new Error("documentId is required");
       const src = sourceLocale || config().sourceLocale;
@@ -1065,7 +1087,7 @@ export default ({ strapi }) => {
 
       const fieldsService = fields();
       const populate = fieldsService.buildPopulate(uid);
-      const source = await strapi.documents(uid).findOne({
+      const source = sourceEntry || await strapi.documents(uid).findOne({
         documentId,
         locale: src,
         populate,
@@ -1092,6 +1114,10 @@ export default ({ strapi }) => {
         });
       }
 
+      if (selectedPaths) {
+        const selected = new Set(selectedPaths);
+        for (const format of ["plain", "html", "blocks"]) bag[format] = bag[format].filter(item => selected.has(item.path.join(".")));
+      }
       const userSettings = await settingsService().get();
       const cache = cacheService();
       const provFn = provider();

@@ -176,6 +176,7 @@ export default ({ strapi }) => {
         documentId,
         locale: targetLocale,
         status: "draft",
+        populate: strapi.plugin("translate").service("translatable-fields")?.buildPopulate(uid),
       });
       const d = diff(existing || {}, result.proposed || {});
 
@@ -247,7 +248,7 @@ export default ({ strapi }) => {
 
       const translate = strapi.plugin("translate").service("translate");
       const repairWarnings = [];
-      const entry = await translate.commitPreview(
+      const commit = () => translate.commitPreview(
         {
           uid: row.uid,
           documentId: row.documentId,
@@ -273,6 +274,10 @@ export default ({ strapi }) => {
           },
         }
       );
+      const state = strapi.plugin("translate").service("state");
+      const entry = await (state ? state.runTranslation(commit) : commit());
+      const changes = strapi.plugin("translate").service("changes");
+      if (changes && excluded.length === 0) await changes.recordFull({ uid: row.uid, documentId: row.documentId, sourceLocale: row.sourceLocale || strapi.plugin("translate").config.sourceLocale, targetLocale: row.targetLocale });
       delete data[id];
       await writeAll(data);
       return { ok: true, entry, warnings: [...(row.warnings || []), ...repairWarnings] };
