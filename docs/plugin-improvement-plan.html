@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Selective translation — plugin improvement plan</title>
+<style>
+@layer fallback { :root{--background:#fff;--foreground:#20232b;--muted:#f3f4f7;--muted-foreground:#626977;--card:#f8f9fb;--border:#dce0e7;--primary:#4945ff;--primary-foreground:#fff;--accent:#4945ff;--accent-surface:#eeedff;--success:#238452;--warning:#9b6417;--radius:12px;--font-sans:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-mono:ui-monospace,SFMono-Regular,Consolas,monospace} }
+*{box-sizing:border-box}html,body{margin:0;background:transparent;color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.65}main{width:100%;padding:0 0 24px}h1,h2,h3,p{margin:0}h1{font-size:32px;letter-spacing:-1px;line-height:1.18;margin:9px 0 14px}h2{font-size:21px;letter-spacing:-.45px;margin-bottom:12px}h3{font-size:15px;line-height:1.45;margin-bottom:7px}p+p{margin-top:10px}a{color:var(--accent);text-underline-offset:3px}code{font:12px var(--font-mono);overflow-wrap:anywhere}pre{white-space:pre-wrap;background:var(--muted);border:1px solid var(--border);border-radius:8px;padding:16px;font:12px/1.7 var(--font-mono)}.eyebrow{font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:1.5px;color:var(--accent)}.intro{font-size:16px;color:var(--muted-foreground);max-width:670px}.muted{color:var(--muted-foreground)}.small{font-size:12px}.tag{display:inline-block;background:var(--accent-surface);color:var(--accent);font-size:11px;font-weight:650;padding:3px 8px;border-radius:6px}.meta{display:flex;flex-wrap:wrap;gap:9px;margin-top:16px}.section{border-top:1px solid var(--border);padding-top:23px;margin-top:26px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.card{padding:18px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card)}.card p{font-size:13px}.num{color:var(--accent);font-weight:800;font-size:12px;margin-bottom:6px}.rule{border-left:3px solid var(--accent);padding:1px 0 1px 14px;margin:15px 0}.rule p{font-size:13px}ul,ol{padding-left:21px;margin:10px 0}li{padding-left:3px;margin:7px 0}.flow{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}.flow div{border-top:2px solid var(--accent);padding:10px 0}.flow strong{font-size:13px}.flow span{display:block;font-size:12px;color:var(--muted-foreground)}.toolbar{display:flex;gap:9px;flex-wrap:wrap;margin-top:16px}button,select{font:inherit;color:var(--foreground)}button{cursor:pointer;border:1px solid var(--border);border-radius:8px;background:var(--background);padding:8px 12px;font-size:12px;font-weight:650}button:hover{border-color:var(--accent)}button:focus-visible,select:focus-visible,summary:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}button.primary{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}button:disabled{cursor:not-allowed;opacity:.45}.mock{border:1px solid var(--border);border-radius:var(--radius);padding:20px;background:var(--card)}.mock-top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:15px}.stepbar{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:18px}.stepbar span{font-size:11px;padding:4px 9px;border-radius:6px;background:var(--muted);color:var(--muted-foreground)}.stepbar .active{background:var(--accent-surface);color:var(--accent);font-weight:750}.pickers{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 0}.locale{padding:12px;border:1px solid var(--border);border-radius:8px;display:flex;gap:10px;align-items:flex-start}.locale input{margin-top:6px;accent-color:var(--primary)}.locale span{display:block}.demo-note{font-size:11px;color:var(--muted-foreground);margin-top:12px}.preview-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0}.preview-box{background:var(--background);border:1px solid var(--border);border-radius:8px;padding:16px}.preview-box p{font-size:15px}.preview-box .caption{font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted-foreground);margin-bottom:8px}.changed{border-left:3px solid var(--accent);padding-left:10px}.relation{background:var(--muted);padding:12px;border-radius:8px;font-size:12px;margin-top:13px}.good{color:var(--success)}.warn{color:var(--warning)}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:12px;margin:14px 0}th{text-align:left;color:var(--muted-foreground);font-size:11px;font-weight:650}th,td{padding:11px 8px 11px 0;border-bottom:1px solid var(--border);vertical-align:top}td:first-child{width:27%;font-weight:650}details{border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-top:12px}summary{font-size:14px;font-weight:700;cursor:pointer}details[open] summary{margin-bottom:13px}.milestone{display:grid;grid-template-columns:48px 1fr;gap:12px;margin:18px 0}.milestone .number{width:36px;height:36px;border-radius:9px;background:var(--accent-surface);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:800}.milestone p{font-size:13px}.gate{font-size:12px;color:var(--muted-foreground);margin-top:6px}.checklist{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}.checklist p{font-size:12px;padding:10px 0;border-bottom:1px solid var(--border)}.sources{font-size:12px}.sources p{margin-top:8px}.hidden{display:none!important}.print-only{display:none}@media(max-width:530px){h1{font-size:27px}.grid,.preview-grid,.pickers,.checklist{grid-template-columns:1fr}.flow{grid-template-columns:1fr 1fr}.mock{padding:16px}.mock-top{align-items:flex-start}td:first-child{width:33%}.milestone{grid-template-columns:38px 1fr}.toolbar button{flex-grow:1}}@media print{button,.demo-note{display:none}details{break-inside:avoid}.section{break-inside:avoid}a{color:inherit}.print-only{display:block}}
+</style>
+</head>
+<body><main>
+<div class="eyebrow">Implementation proposal · Strapi Translate</div>
+<h1>Translate what changed.<br>Keep every language connected.</h1>
+<p class="intro">After saving a German page, choose the languages to update, review only the affected modules, and use the matching localized collection items in each translation.</p>
+<div class="meta"><span class="tag">Based on plugin v0.1.2</span><span class="tag">Two requested features</span><span class="tag">Plan + interactive example</span></div>
+<p class="small muted" style="margin-top:12px">Repository inspected on 12 October 2026. This document proposes implementation; the example below uses sample data.</p>
+
+<section class="section">
+<h2>1. The experience we should build</h2>
+<div class="grid">
+<div class="card"><div class="num">01 / SELECTIVE TRANSLATION</div><h3>Save → select languages → preview → apply</h3><p>A successful save opens a popup when eligible content changed. Show the changed module names and fields, allow multiple target languages, and stage translations for review. Apply only approved changes to target drafts.</p></div>
+<div class="card"><div class="num">02 / LOCALIZED COLLECTION LINKS</div><h3>Resolve every link in the target language</h3><p>For each relation in a changed module, check for the linked document’s target-language version. An English page should use the English article when it exists. Show missing translations and draft-only items in the preview.</p></div>
+</div>
+<div class="rule"><p><strong>Recommended default:</strong> translate changed fields, preserve untouched target content, and resolve links in the affected modules. Offer a separate selection to translate changes to linked collection items.</p><p>Confirmed preference: relink by default and offer linked-item translation as an explicit option. Linked article changes get their own review before they are applied.</p></div>
+<div class="flow"><div><strong>1 · Save source</strong><span>Wait for success.</span></div><div><strong>2 · Choose languages</strong><span>Show actual scope.</span></div><div><strong>3 · Review modules</strong><span>Text + resolved links.</span></div><div><strong>4 · Apply drafts</strong><span>Report each language.</span></div></div>
+<ul>
+<li>The popup opens once for the user’s completed save. Failed saves, timestamp-only updates, and plugin-generated writes do not trigger it.</li>
+<li>Display existing translations, missing page locales, pending changes from earlier saves, and relation warnings before starting.</li>
+<li>Remember language choices per content type. Exclude the source language and languages the editor cannot update.</li>
+<li>“Later” closes the popup and retains pending changes in a translation side panel. A later save combines unapplied changes for each language.</li>
+<li>For several changed modules, show a module list and review one module at a time, with a tab for each selected language.</li>
+<li>For a missing page locale, offer an explicit <strong>initial full translation</strong>. A small patch cannot reliably create a complete page with required fields.</li>
+</ul>
+</section>
+
+<section class="section" id="example">
+<h2>2. Try the proposed workflow</h2>
+<p class="muted small" style="margin-bottom:13px">Example: only the title in the “Featured articles” module changed. English has the linked article; French does not.</p>
+<div class="mock">
+<div class="mock-top"><strong>Page: Travel guide <span class="muted small">· German</span></strong><span class="tag">Interactive mockup</span></div>
+<div class="stepbar" aria-label="Workflow"><span id="s0" class="active">1 Save</span><span id="s1">2 Languages</span><span id="s2">3 Module preview</span><span id="s3">4 Result</span></div>
+<div id="demo0"><h3>One module has changed</h3><div class="preview-grid"><div class="preview-box"><div class="caption">Previous German title</div><p>Unsere Reisetipps</p></div><div class="preview-box"><div class="caption">New German title</div><p class="changed">Entdecke unsere neuesten Reisetipps</p></div></div><p class="small muted">Hero, footer, and all other modules keep their existing translations.</p><div class="toolbar"><button class="primary" id="saveDemo">Save page</button></div></div>
+<div id="demo1" class="hidden"><h3>Page saved. Translate these changes?</h3><p class="small muted">Featured articles · 1 text field changed · 1 collection link to check</p><div class="pickers"><label class="locale"><input id="english" type="checkbox" checked><span><strong>English</strong><span class="small good">Page exists · article available</span></span></label><label class="locale"><input id="french" type="checkbox"><span><strong>French</strong><span class="small warn">Page exists · article unavailable</span></span></label></div><label class="small"><input id="includeChild" type="checkbox"> Also review pending changes to linked articles</label><p id="scope" class="small muted" style="margin-top:9px" aria-live="polite"></p><div class="toolbar"><button class="primary" id="previewDemo">Generate module preview</button><button id="laterDemo">Later</button></div></div>
+<div id="demo2" class="hidden"><div class="mock-top"><h3 style="margin:0">Featured articles · module preview</h3><select id="previewLanguage" aria-label="Preview language"></select></div><div class="preview-grid"><div class="preview-box"><div class="caption">Saved German source</div><p>Entdecke unsere neuesten Reisetipps</p><div class="relation">Article: <strong>Wandern in den Alpen</strong><br><span class="muted">German · document article-A</span></div></div><div class="preview-box"><div class="caption" id="targetCaption">Proposed English draft</div><p class="changed" id="targetTitle"></p><div class="relation" id="targetRelation"></div></div></div><p class="small"><strong>Only the title is translated.</strong> The module’s other text and the page’s other modules keep their current target values.</p><p id="childInfo" class="small muted" style="margin-top:9px"></p><p id="warningInfo" class="small warn" style="margin-top:9px" aria-live="polite"></p><div class="toolbar"><button class="primary" id="applyDemo">Apply selected drafts</button><button id="backDemo">Change languages</button><button id="discardDemo">Discard preview</button></div></div>
+<div id="demo3" class="hidden"><h3 id="resultTitle"></h3><p id="resultText" class="small"></p><div class="toolbar"><button id="resetDemo">Try again</button></div></div>
+<p class="demo-note">Simulation only: no CMS save, translation request, or publication occurs. French is blocked here to demonstrate an unresolved required relation.</p>
+</div>
+</section>
+
+<section class="section">
+<h2>3. What we can reuse, and what must change</h2>
+<div class="table-wrap"><table><thead><tr><th>Area</th><th>Observed today</th><th>Planned improvement</th></tr></thead><tbody>
+<tr><td>Translation engine</td><td><code>server/services/translate.js</code> walks the complete saved source and builds a new payload.</td><td>Filter work by a server-generated change set and merge approved fields into the current target tree.</td></tr>
+<tr><td>Preview</td><td><code>server/services/preview.js</code> stores a proposed payload and index-based diff for one hour.</td><td>Store a scoped patch, source/target revisions, module mapping, and relation decisions; populate the target before comparing.</td></tr>
+<tr><td>Admin action</td><td><code>TranslateAction.jsx</code> has a language picker; preview is enabled only for a single target.</td><td>Add a save observer, reusable modal, module cards, and asynchronous previews for multiple languages.</td></tr>
+<tr><td>Relations</td><td>References are copied by document ID; preflight checks existence without a locale filter.</td><td>Batch-check target-language availability and publication status; normalize relation writes for that locale.</td></tr>
+<tr><td>Jobs and formatting</td><td>Multi-locale jobs, cancellation, cache, glossary, HTML/blocks, and validation repair already exist.</td><td>Reuse them, report changed-field progress, and constrain repairs to approved fields.</td></tr>
+<tr><td>Automatic updates</td><td><code>auto-translate.js</code> supports configured update/publish rules and an in-memory recursion guard.</td><td>Share change detection; configure prompt or automatic mode per rule so one save does not launch duplicate jobs.</td></tr>
+</tbody></table></div>
+<p class="small muted">Related prerequisite: the walker currently enters the same copy branch for <code>skip</code> and <code>copy</code>. Make <code>skip</code> truly omit writes before introducing selective merges. Also verify configuration wiring: registration assigns only <code>settings</code> to the runtime config, while auto-translate reads <code>autoTranslate</code> there.</p>
+</section>
+
+<section class="section">
+<h2>4. Technical design</h2>
+<p class="muted small">The essential design is a persisted change set, stable module mapping, locale-aware relation resolution, and a previewed patch. Expand each part for implementation details.</p>
+<div class="toolbar"><button id="expandAll">Expand technical details</button><button id="printPlan">Print / save as PDF</button></div>
+
+<details class="tech"><summary>A. Detect saved changes and retain pending work</summary>
+<ol><li>Register a Document Service middleware for supported localized content types. Load the deeply populated source draft before an update; call <code>next()</code>; load the saved source afterward. Use a schema-aware canonical representation to compare content. Publish events should follow configured rules and avoid duplicating a prior save.</li>
+<li>Ignore managed timestamps and author stamps; retain component IDs separately for matching. Include translatable text, explicit clears, eligible copied fields, relation membership/order, and module insertion/removal/reordering. Never use <code>ctx.params.data</code> alone: it may contain partial values and connect/disconnect operations.</li>
+<li>Persist an immutable change record only after the source write succeeds and its transaction commits. Associate it with content type, document, source locale, source revision/hash, acting user, and a save correlation token. A tracking failure must leave the source save intact and surface a retryable translation status.</li>
+<li>Maintain an applied source baseline <strong>per target language and field/module</strong>. Diff the latest source against that baseline when creating a preview. Otherwise, skipping French on one save would lose its earlier pending changes on the next save.</li>
+<li>On successful apply, advance baselines only for the accepted operations in that language. Dismissed prompts, excluded fields, failed targets, and discarded previews remain pending. Distinguish “already current” from “pending but deliberately skipped.”</li></ol>
+<p>Use dedicated plugin records for change sets, mappings, baselines, and previews, with schema versions, indexes, expiry, and per-record writes. The current whole-store preview object is a reuse point, but concurrent read/modify/write operations need stronger persistence before supporting several editors.</p>
+<p><strong>First use:</strong> capture future source saves immediately. Existing localized pages need a reviewed module alignment and baseline, or an explicit full translation. Do not infer historical synchronization from matching array positions.</p>
+<p class="small muted">Strapi supports middleware before and after Document Service calls; its documentation places plugin middleware registration in <code>register()</code>. The commit notification and exact admin save observer still require a compatibility spike. <a href="https://docs.strapi.io/cms/api/document-service/middlewares" target="_blank" rel="noopener">Document Service middleware reference</a></p>
+</details>
+
+<details class="tech"><summary>B. Match modules and apply only approved fields</summary>
+<p><strong>A module means one component or dynamic-zone item.</strong> A root field such as the page title gets its own review group. Store logical module keys in plugin metadata, mapping source component identity to the target component identity for each language.</p>
+<ul><li>Use source component IDs to follow existing modules within that source draft; use a separate mapped target ID when editing the target. IDs are not shared across locales. Persist parent identity and component type, and refresh mappings after writes.</li>
+<li>Test whether IDs survive save/publish on supported Strapi versions. If a host app already has a stable module UUID, prefer it. If identities are recreated, require explicit alignment or an opt-in stable-key field; avoid guessing from translated content.</li>
+<li>Represent edits as semantic operations: <code>setField</code>, <code>clearField</code>, <code>insertModule</code>, <code>removeModule</code>, <code>moveModule</code>, and <code>resolveRelation</code>. Address operations by logical identity and field path, using array indices only when serializing the final payload.</li>
+<li>Traverse only changed translation fields for provider work. A changed rich-text field is translated as one coherent field with its full formatting; other fields remain untouched. Changed empty/null values clear the target explicitly without calling the provider.</li>
+<li>Start from the fully populated target draft. Apply the selected operations to it, keeping untouched target text, IDs, media, relations, and locale-specific modules. Normalize this merged tree into a writable payload rather than submitting populated read objects directly.</li>
+<li>For a component array or dynamic zone, Strapi may require the complete merged array in the update. Include the current untouched target items and their target IDs; omit source IDs on inserted items. “Selective” describes which content changes, not necessarily the size of the serialized request.</li>
+<li>Preview additions, removals, and moves explicitly. Do not delete a target-only module or overwrite a conflicting manual edit automatically. When alignment is ambiguous, ask for module matching inside the review UI.</li></ul>
+<p>Respect <code>translate</code>, <code>copy</code>, <code>skip</code>, <code>delete</code>, and <code>regenerate</code>, plus Strapi’s field localization settings. Shared/nonlocalized fields must not be replayed once per locale. Include dependent regenerated slugs in the review if an approved title change would alter them.</p>
+</details>
+
+<details class="tech"><summary>C. Resolve linked collection items by language</summary>
+<ol><li>Collect eligible relations inside each affected module, including unchanged links that need localization. Preserve <code>skip</code> fields. Keep media and nonlocalized collections on their appropriate shared references.</li>
+<li>Group localized references by collection type, target locale, and required status. Query all document IDs in a batch and build an availability map. Repeated links should share the lookup.</li>
+<li>For <code>article-A</code> linked in German, check the same logical document ID with <code>locale: 'en'</code>. Strapi’s document ID identifies the document across locale variants; the English version generally does not have a different document ID. Do not match by title or translated slug.</li>
+<li>Serialize links through a relation adapter using the target locale in the document update and the supported relation syntax for each cardinality. Handle additions, removals, and order, rather than appending every source link. Prove actual resolution in integration tests, including relations nested in components.</li>
+<li>Return a human-readable decision for every affected link: source label, target label, document ID, language, status, and proposed action. A manually different target relation becomes an explicit review choice.</li></ol>
+<div class="table-wrap"><table><thead><tr><th>Condition</th><th>Proposed behavior</th></tr></thead><tbody>
+<tr><td>Target locale exists</td><td>Use that variant; display its localized label.</td></tr>
+<tr><td>Target is draft-only</td><td>Allow a draft link; flag its unpublished status. Publishing must verify dependent visibility under the host app’s rules.</td></tr>
+<tr><td>Target locale missing</td><td>Offer “translate/create this item,” retain a valid existing target link to the same logical item, or omit an optional link with explicit review. An unresolved required link blocks that module’s acceptance.</td></tr>
+<tr><td>Source item deleted</td><td>Surface a stale-reference warning and show the proposed removal; block if schema requirements cannot be satisfied.</td></tr>
+<tr><td>Collection not localized</td><td>Retain the shared item. No locale lookup or content translation is needed.</td></tr>
+</tbody></table></div>
+<p><strong>Linked-item content translation:</strong> the optional selection adds separate article previews for known pending changes, or a full initial translation when its target version is missing. Do not retranslate an entire article merely because its parent module’s title changed. Reuse the same selective pipeline and baselines for children; show the effect on all pages sharing the article.</p>
+<p>Limit the first release to explicitly selected direct children, deduplicate by collection/document/language, and detect cycles. Apply an approved child first, then its parent relation. A child failure blocks the dependent parent operation while allowing independent targets to finish. Saving an article directly should also expose its own pending translation workflow.</p>
+<p class="small muted">Locale lookups and locale-specific relation writes are documented Strapi features. Nested relation behavior and unsupported/morph relations should be verified or rejected with a clear review message. <a href="https://docs.strapi.io/cms/api/document-service/locale" target="_blank" rel="noopener">Locale lookup reference</a> · <a href="https://docs.strapi.io/cms/api/rest/relations" target="_blank" rel="noopener">Relation write reference</a></p>
+</details>
+
+<details class="tech"><summary>D. Stage previews, prevent conflicts, and keep saves predictable</summary>
+<ul><li>Stage one preview per target language in the existing job flow; return <code>202 { jobId }</code> quickly. Keep cancellation and per-language progress. Existing synchronous single-language preview clients should remain supported.</li>
+<li>Store approved-scope operations, source snapshot/revision, target fingerprint, identity mapping version, glossary/voice fingerprint, relation resolutions, author, and expiry. Keep the one-hour preview TTL initially.</li>
+<li>Review source text, current target text, and proposed target text. Provide module cards, field-level selections, full expandable text, relation labels, and separate cards for linked items. Scope excludes all unchanged modules.</li>
+<li>On apply, recheck permission, current source revision, target content, relation availability, and mapping. A changed source invalidates the preview. A changed target requires rebasing/review; never commit the old full payload over new edits.</li>
+<li>Validate a transaction/locking strategy in the spike to close the gap between conflict check and write, including manual CMS updates and multiple app instances. If it cannot be made reliable on the declared version range, constrain support before promising conflict protection.</li>
+<li>Give preview acceptance an idempotency key and record its result atomically with baseline advancement. Retrying after a network failure must not insert modules twice. Lock or version preview records against simultaneous accept requests.</li>
+<li>Keep commits atomic per page/locale; show partial success across languages and dependent documents. Retry failed work only. Reuse validation repair for approved text, but if repair changes a staged translation, return the repaired preview for review before applying it.</li>
+<li>Recheck read/write permissions for the parent, linked content, relevant fields, and allowed languages. Preserve creator metadata, stamp the current acting editor appropriately, and use operation provenance to suppress recursive prompts/auto-jobs across instances.</li></ul>
+<p>Apply to drafts where Draft &amp; Publish is enabled; publication remains a separate action. For content types without drafts, saving immediately affects live content, so the review must clearly name that effect.</p>
+<p><strong>Preview scope:</strong> the first release renders the module’s content inside the CMS. An exact website preview requires a host frontend renderer/preview integration; the plugin does not have each site’s component templates.</p>
+</details>
+
+<details class="tech"><summary>E. Connect the admin UI and API</summary>
+<p>Add a mounted Edit View panel/observer alongside the document action. Detect the current user’s successful save from the supported refreshed document state or hook for the tested Strapi version, and request the matching persisted change set. Deduplicate by save token/revision, not by every render or poll. Keep a “Pending translation changes” panel for dismissed prompts and changes made through the API.</p>
+<p class="small muted">Strapi exposes document actions and Edit View side panels. Its documented extension API does not establish a universal after-save event; verify the observer integration before committing to a version range. <a href="https://docs.strapi.io/cms/plugins-development/content-manager-apis" target="_blank" rel="noopener">Content Manager extension reference</a></p>
+<div class="table-wrap"><table><thead><tr><th>Proposed endpoint</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>POST /translate/changes</code></td><td>Read saved/pending changes for UID, document, source locale, and revision; return a server-generated change-set ID.</td></tr>
+<tr><td><code>POST /translate/estimate</code></td><td>Add optional change-set/module selection to the existing estimate; count only changed text and selected child work.</td></tr>
+<tr><td><code>POST /translate/preview</code></td><td>Add asynchronous scoped mode with <code>changeSetId</code>, <code>targetLocales</code>, selected operations/modules, and linked-item selection.</td></tr>
+<tr><td><code>GET /translate/jobs/:id</code></td><td>Reuse polling; include preview IDs and relation/conflict status per target.</td></tr>
+<tr><td><code>POST /translate/preview/:id/accept</code></td><td>Accept validated selected operations with an idempotency key; return applied, blocked, or needs-review status.</td></tr>
+<tr><td><code>POST /translate/preview/:id/discard</code></td><td>Remove staged output while keeping unapplied source changes pending.</td></tr>
+</tbody></table></div>
+<pre>{
+  "uid": "api::page.page",
+  "documentId": "page-A",
+  "sourceLocale": "de",
+  "changeSetId": "saved-change-123",
+  "targetLocales": ["en", "fr"],
+  "mode": "changes",
+  "moduleKeys": ["featured-articles-7"],
+  "linkedItems": { "mode": "resolve-existing", "selected": [] }
+}</pre>
+<p class="small muted">Illustrative contract, not an existing API. The server resolves paths and allowed operations from its stored change set; client-provided selectors are not authority to write arbitrary fields.</p>
+</details>
+</section>
+
+<section class="section">
+<h2>5. Delivery plan and implementation locations</h2>
+<p class="small muted">Deliver in dependency order. Estimates below are planning ranges for one developer, excluding stakeholder review; revise after the compatibility spike.</p>
+<div class="milestone"><div class="number">0</div><div><h3>Prove Strapi behavior <span class="muted small">· 2–3 days</span></h3><p>Build a fixture app with German/English/French pages, duplicate module types, nested components, articles, and draft/published variants. Verify save observation, module ID continuity, merged arrays, nested locale relations, and transaction/conflict handling. Check runtime configuration and <code>skip</code> behavior.</p><div class="gate">Exit: working examples establish the supported minimum Strapi version and resolve the highest-risk assumptions.</div></div></div>
+<div class="milestone"><div class="number">1</div><div><h3>Change tracking and module mapping <span class="muted small">· 4–6 days</span></h3><p>Add <code>changes.js</code>, <code>module-map.js</code>, persisted change/baseline records, and middleware registration. Extract reusable traversal from <code>translate.js</code> and extend <code>translatable-fields.js</code> for field localization metadata.</p><div class="gate">Exit: one saved text edit produces one change, skipped locales retain pending work, and reordered duplicate modules stay correctly aligned.</div></div></div>
+<div class="milestone"><div class="number">2</div><div><h3>Selective compute, relation resolution, and commit <span class="muted small">· 4–6 days</span></h3><p>Add <code>relations.js</code> and <code>patch.js</code>; extend <code>translate.js</code>, <code>preview.js</code>, controllers, routes, and jobs. Implement target merges, batched localized links, conflict checks, and idempotent acceptance.</p><div class="gate">Exit: applying one module edit preserves unrelated target content and selects the correct linked article language.</div></div></div>
+<div class="milestone"><div class="number">3</div><div><h3>Save popup and module review <span class="muted small">· 3–5 days</span></h3><p>Extract the modal from <code>TranslateAction.jsx</code>; add <code>SaveTranslationPrompt.jsx</code> and <code>ModulePreview.jsx</code>; register the observer/panel in <code>admin/src/index.js</code>. Add language tabs, pending-change recovery, relation warnings, and English/German interface strings.</p><div class="gate">Exit: the full save → language choice → module preview → apply flow works with keyboard navigation and multiple targets.</div></div></div>
+<div class="milestone"><div class="number">4</div><div><h3>Linked-item updates, integration tests, and rollout <span class="muted small">· 3–5 days</span></h3><p>Add explicit child selection and dependent previews, deduplication/cycle limits, restart recovery, and versioned metadata migration. Extend existing test suites and README with missing-locale, fallback, and conflict behavior.</p><div class="gate">Exit: acceptance scenarios below pass in a real Strapi fixture; enable by content type behind a configuration flag.</div></div></div>
+<div class="rule"><p><strong>Overall planning range: 16–25 developer days.</strong> Module identity, concurrent writes, and Strapi version support are the main estimate drivers. Exact frontend-rendered previews would need a separately scoped site integration.</p></div>
+<p class="small">Keep the existing full-document action available for initial translation and deliberate resynchronization. Configure <code>prompt</code>, <code>automatic</code>, or <code>off</code> per content type/source locale; automatic mode should reuse the same selective engine and relation rules.</p>
+</section>
+
+<section class="section">
+<h2>6. Acceptance criteria</h2>
+<div class="checklist">
+<p><strong>One field edit:</strong> only that field reaches the provider; only its approved target value changes.</p>
+<p><strong>Multiple languages:</strong> select English and French, review each independently, and apply only chosen drafts.</p>
+<p><strong>Existing manual translations:</strong> untouched text, relations, media, IDs, and target-only modules survive the merge.</p>
+<p><strong>Module structure:</strong> insertion, deletion, reordering, nested modules, and duplicate component types map correctly.</p>
+<p><strong>Linked articles:</strong> the English page resolves the English article with the same logical document ID.</p>
+<p><strong>Missing language:</strong> optional links need an explicit reviewed fallback; unresolved required links block acceptance.</p>
+<p><strong>Pending changes:</strong> a skipped language receives earlier unapplied edits on a later run; excluded fields stay pending.</p>
+<p><strong>Concurrent edits:</strong> a changed source/target invalidates or rebases the preview; retries cannot duplicate modules.</p>
+<p><strong>Edge values:</strong> clears and relation-only changes work without unnecessary AI calls; formatting and constraints survive.</p>
+<p><strong>Permissions and recursion:</strong> parent/child permissions are enforced; translation writes never prompt or enqueue themselves again.</p>
+<p><strong>Jobs:</strong> cancellation, restart, expired previews, partial language failure, and child failure offer a recoverable outcome.</p>
+<p><strong>Publication:</strong> draft workflows keep publication separate; draft-only linked items are visible as warnings.</p>
+</div>
+<p class="small muted" style="margin-top:14px">Extend <code>tests/services/translate.test.js</code>, <code>preview.test.js</code>, <code>translatable-fields.test.js</code>, <code>auto-translate.test.js</code>, and controller tests. Add focused tests for changes/mapping/relations, plus real Strapi integration and admin workflow checks. Existing mocks alone cannot verify locale resolution or component persistence.</p>
+</section>
+
+<section class="section sources">
+<h2>7. Decisions and boundaries</h2>
+<p><strong>Proposed product defaults:</strong> prompt after a successful source save; translate changed fields; select languages explicitly; require preview; apply to drafts; relink existing localized collection items; offer linked-item translation as an explicit selection.</p>
+<p><strong>Implementation gates:</strong> supported Strapi version and save observer; stable module identity/alignment strategy; atomic conflict checking; missing-link policy for each schema. The spike should settle these before broad rollout.</p>
+<p><strong>Frontend delivery:</strong> this plugin updates CMS content. If the website caches pages or uses static builds, publishing/revalidation must use the host site’s integration. Updating only one visible site module may require targeted cache invalidation outside the plugin.</p>
+<p><strong>Evidence:</strong> current behavior comes from the repository files listed above. API capabilities were checked against official <a href="https://docs.strapi.io/cms/api/document-service/middlewares" target="_blank" rel="noopener">middleware</a>, <a href="https://docs.strapi.io/cms/api/document-service/locale" target="_blank" rel="noopener">locale</a>, <a href="https://docs.strapi.io/cms/api/rest/relations" target="_blank" rel="noopener">relation</a>, and <a href="https://docs.strapi.io/cms/plugins-development/content-manager-apis" target="_blank" rel="noopener">Content Manager</a> documentation. Architecture, estimates, and defaults are recommendations, not claims that the features already exist.</p>
+</section>
+</main>
+<script>
+(()=>{
+let phase=0;const $=id=>document.getElementById(id);const chosen=()=>[['en','English'],['fr','French']].filter(([code])=>$(code==='en'?'english':'french').checked);
+function show(n){phase=n;for(let i=0;i<4;i++){$('demo'+i).classList.toggle('hidden',i!==n);$('s'+i).classList.toggle('active',i===n)}}
+function scope(){const count=chosen().length;$('scope').textContent=count?`Preview ${count} language${count===1?'':'s'} · 1 changed field per language · localized link checks`:'Choose at least one target language.';$('previewDemo').disabled=!count}
+function review(){const fr=$('previewLanguage').value==='fr';$('targetCaption').textContent=fr?'Proposed French draft':'Proposed English draft';$('targetTitle').textContent=fr?'Découvrez nos derniers conseils de voyage':'Discover our latest travel tips';const r=$('targetRelation');r.replaceChildren();const line=document.createElement('strong');line.textContent=fr?'French article unavailable':'Hiking in the Alps';r.append(line,document.createElement('br'));const info=document.createElement('span');info.className=fr?'warn':'good';info.textContent=fr?'Required link unresolved · article-A':'English · same document article-A';r.append(info);$('childInfo').textContent=$('includeChild').checked?'Linked articles included: this sample article has no pending source-text changes. A missing locale requires an explicit initial-translation choice.':'Linked article content stays as-is; this preview only resolves its localized reference.';const blocked=$('french').checked;$('warningInfo').textContent=blocked?'French has an unresolved required article link. Return to language selection and choose English only to complete this example. The real workflow would also offer a child translation preview.':'';$('applyDemo').disabled=blocked;$('applyDemo').textContent=`Apply ${chosen().length} selected draft${chosen().length===1?'':'s'}`}
+$('saveDemo').onclick=()=>{scope();show(1)};$('english').onchange=scope;$('french').onchange=scope;
+$('previewDemo').onclick=()=>{if(!chosen().length)return;const select=$('previewLanguage');select.replaceChildren();chosen().forEach(([code,name])=>{const o=document.createElement('option');o.value=code;o.textContent=name;select.append(o)});review();show(2)};$('previewLanguage').onchange=review;
+$('backDemo').onclick=()=>{scope();show(1)};$('applyDemo').onclick=()=>{if($('french').checked)return;$('resultTitle').textContent='English draft updated';$('resultText').textContent='The Featured articles title changed and the link uses the English article. Other modules keep their current translations. Publication is a separate action.';show(3)};
+$('laterDemo').onclick=()=>{$('resultTitle').textContent='Changes kept for later';$('resultText').textContent='The German page is saved. No target language was updated; pending changes remain available in the translation panel.';show(3)};
+$('discardDemo').onclick=()=>{$('resultTitle').textContent='Preview discarded';$('resultText').textContent='No target content changed. The saved German edits remain pending for translation.';show(3)};
+$('resetDemo').onclick=()=>{$('english').checked=true;$('french').checked=false;$('includeChild').checked=false;show(0)};
+$('expandAll').onclick=()=>{const items=[...document.querySelectorAll('details.tech')];const open=items.some(d=>!d.open);items.forEach(d=>d.open=open);$('expandAll').textContent=open?'Collapse technical details':'Expand technical details'};
+$('printPlan').onclick=()=>{document.querySelectorAll('details.tech').forEach(d=>d.open=true);window.print()};
+document.querySelectorAll('details.tech').forEach(d=>d.addEventListener('toggle',()=>{const all=[...document.querySelectorAll('details.tech')].every(x=>x.open);$('expandAll').textContent=all?'Collapse technical details':'Expand technical details'}));
+console.log('Plan initialized: 4 demo stages, 5 technical sections, 12 acceptance scenarios.');
+})();
+</script>
+</body>
+</html>

@@ -66,14 +66,15 @@ export default ({ strapi }) => {
       }
       strapi.documents.use(async (ctx, next) => {
         const result = await next();
+        if (strapi.plugin("translate").service?.("state")?.isTranslation()) return result;
         // Only run on actions that mean "the source document changed".
         if (ctx.action !== "publish" && ctx.action !== "update") return result;
         // The result of publish is an array of locales; update is a single entry.
-        const resultArr = Array.isArray(result) ? result : result ? [result] : [];
+        const resultArr = Array.isArray(result) ? result : Array.isArray(result?.entries) ? result.entries : result ? [result] : [];
         for (const entry of resultArr) {
           if (!entry || !entry.documentId || !entry.locale) continue;
           // Loop prevention: skip if we're the one who wrote this entry.
-          if (inFlight.has(inFlightKey(ctx.uid, entry.documentId, entry.locale))) {
+          if (!strapi.plugin("translate").service?.("state") && inFlight.has(inFlightKey(ctx.uid, entry.documentId, entry.locale))) {
             continue;
           }
           const matching = rules.filter((r) =>
@@ -91,16 +92,17 @@ export default ({ strapi }) => {
               (l) => l !== entry.locale
             );
             if (targets.length === 0) continue;
-            this.enqueue({
+            const enqueue = () => this.enqueue({
               uid: ctx.uid,
               documentId: entry.documentId,
               sourceLocale: entry.locale,
               targetLocales: targets,
             }).catch((err) => {
-              strapi.log?.warn?.(
-                `[translate] auto-translate enqueue failed: ${err?.message || err}`
-              );
+              strapi.log?.warn?.(`[translate] auto-translate enqueue failed: ${err?.message || err}`);
             });
+            if (strapi.db?.inTransaction?.()) {
+              await strapi.db.transaction(({ onCommit }) => { onCommit(enqueue); });
+            } else enqueue();
           }
         }
         return result;
@@ -140,13 +142,24 @@ export default ({ strapi }) => {
           const key = inFlightKey(uid, documentId, target.locale);
           inFlight.add(key);
           try {
-            const { entry, warnings } = await translate.translateDocument({
+            const changes = strapi.plugin("translate").service("changes");
+            const pending = changes?.enabled(uid, sourceLocale) ? await changes.get({ uid, documentId, sourceLocale, targetLocale: target.locale }) : null;
+            let entry, warnings;
+            if (pending?.revision) {
+              if (pending.modules.length) {
+                const selective = strapi.plugin("translate").service("selective-preview");
+                const staged = await selective.create({ uid, documentId, sourceLocale, targetLocale: target.locale, revision: pending.revision, initialTranslation: true, signal: job.signal });
+                if (job.signal.aborted) throw Object.assign(new Error("Translation cancelled"), { name: "AbortError" });
+                const applied = await selective.accept(staged.previewId);
+                entry = applied; warnings = applied.warnings;
+              } else { entry = { documentId, locale: target.locale }; warnings = []; }
+            } else ({ entry, warnings } = await translate.translateDocument({
               uid,
               documentId,
               sourceLocale,
               targetLocale: target.locale,
               signal: job.signal,
-            });
+            }));
             target.state = "done";
             target.result = {
               documentId: entry.documentId,
@@ -176,6 +189,7 @@ export default ({ strapi }) => {
           ? "cancelled"
           : "failed";
         job.finishedAt = Date.now();
+        await jobs.persistNow();
       })().catch((err) => {
         job.state = "failed";
         job.error = err?.message || String(err);

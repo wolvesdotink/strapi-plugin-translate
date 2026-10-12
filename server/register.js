@@ -57,7 +57,13 @@ export default ({ strapi }) => {
   //   defaults — fallback for the user-editable voice + glossary, seeded into
   //              strapi.store on first read by services/settings.js
   strapi.plugin("translate").provider = provider;
-  strapi.plugin("translate").config = settings;
+  strapi.plugin("translate").config = {
+    ...settings,
+    autoTranslate: pluginConfig.autoTranslate,
+    selectiveTranslation: pluginConfig.selectiveTranslation,
+    persistJobs: pluginConfig.persistJobs,
+  };
+  strapi.plugin("translate").service("changes").install();
   strapi.plugin("translate").defaults = {
     voice: typeof settings.voice === "string" ? settings.voice : "",
     glossary: {

@@ -54,6 +54,7 @@ const settingsPermissions = () => [
 const authedOnly = () => ["admin::isAuthenticatedAdmin"];
 
 export default [
+  { method: "POST", path: "/changes", handler: "translate.getChanges", config: { policies: contentPermissions() } },
   {
     method: "POST",
     path: "/document",

@@ -102,6 +102,36 @@ const makeStrapi = ({
   };
 };
 
+describe("scoped preview job access", () => {
+  it("keeps staged field values private to the editor who generated them", async () => {
+    const jobs = { get: () => ({ id:"job",uid:"api::page.page",source:"preview",userId:2,targets:[{result:{modules:[{fields:[{after:"Private translation"}]}]}}] }) };
+    const controller = controllerFactory({strapi:makeStrapi({jobs})});
+    const ctx = makeCtx({params:{id:"job"}});
+    await controller.getJob(ctx);
+    expect(ctx.status).toBe(404);
+    expect(JSON.stringify(ctx.body)).not.toContain("Private translation");
+  });
+  it("does not let another editor cancel a scoped preview job", async () => {
+    let cancelled = false;
+    const jobs = { get: () => ({id:"job",uid:"api::page.page",source:"preview",userId:2}), cancel:()=>{cancelled=true;return {ok:true};} };
+    const controller = controllerFactory({strapi:makeStrapi({jobs})});
+    const ctx = makeCtx({params:{id:"job"}});
+    await controller.cancelJob(ctx);
+    expect(ctx.status).toBe(404);
+    expect(cancelled).toBe(false);
+  });
+  it("omits other editors' previews and strips staged values from history", async () => {
+    const jobs = { list:()=>[
+      {id:"mine",uid:"api::page.page",source:"preview",userId:1,targets:[{result:{previewId:"change_a",modules:[{fields:[{after:"Private translation"}]}]}}]},
+      {id:"theirs",uid:"api::page.page",source:"preview",userId:2,targets:[]},
+    ] };
+    const controller = controllerFactory({strapi:makeStrapi({jobs})});
+    const ctx=makeCtx();await controller.listJobs(ctx);
+    expect(ctx.body.jobs.map(j=>j.id)).toEqual(["mine"]);
+    expect(JSON.stringify(ctx.body)).not.toContain("Private translation");
+  });
+});
+
 describe("translate controller — listJobs", () => {
   it("returns most-recent-first jobs trimmed to limit", async () => {
     const jobList = [
