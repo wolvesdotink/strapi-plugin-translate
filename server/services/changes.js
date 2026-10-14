@@ -16,6 +16,12 @@ export default ({ strapi }) => {
     state().key("baseline", uid, id, source, target);
   let installed = false;
   const recoveries = new Map();
+  const sourceLocales = () => {
+    const cfg = strapi.plugin("translate").config || {};
+    return (
+      cfg.selectiveTranslation?.sourceLocales || [cfg.sourceLocale || "de"]
+    );
+  };
   const enabled = (uid, locale) => {
     const cfg = strapi.plugin("translate").config || {};
     const selective = cfg.selectiveTranslation || {};
@@ -26,7 +32,7 @@ export default ({ strapi }) => {
       schema?.pluginOptions?.i18n?.localized &&
       (!selective.contentTypes?.length ||
         selective.contentTypes.includes(uid)) &&
-      (selective.sourceLocales || [cfg.sourceLocale || "de"]).includes(locale)
+      sourceLocales().includes(locale)
     );
   };
   const load = (uid, documentId, locale) =>
@@ -36,6 +42,60 @@ export default ({ strapi }) => {
       status: "draft",
       populate: fields().buildPopulate(uid),
     });
+  // A translation added by an ordinary save starts in sync with the tracked
+  // source, so later source edits list only what changed after it was added.
+  const adoptTarget = async (ctx, locale, trx, next) => {
+    const { documentId } = ctx.params;
+    const sources = sourceLocales().filter(
+      (source) => source !== locale && enabled(ctx.uid, source),
+    );
+    let added = false;
+    try {
+      added =
+        sources.length > 0 &&
+        !(await strapi.db
+          .query(ctx.uid)
+          .findOne({ where: { documentId, locale }, select: ["id"] }));
+    } catch (err) {
+      strapi.log.warn(
+        `[translate] change tracking unavailable before save: ${err.message}`,
+      );
+    }
+    const result = await next();
+    if (!added) return result;
+    try {
+      await trx.transaction(async () => {
+        for (const sourceLocale of sources) {
+          if (
+            !(await state().read(
+              sourceKey(ctx.uid, documentId, sourceLocale),
+            )) ||
+            (await state().read(
+              baselineKey(ctx.uid, documentId, sourceLocale, locale),
+            ))
+          )
+            continue;
+          const source = await load(ctx.uid, documentId, sourceLocale);
+          if (!source) continue;
+          // Hand-written translations may order modules differently; keep
+          // alignment to stable keys instead of guessing by position.
+          await state().write(
+            baselineKey(ctx.uid, documentId, sourceLocale, locale),
+            {
+              version: 1,
+              snapshot: snapshot(strapi, ctx.uid, source),
+              mapping: { root: "root" },
+            },
+          );
+        }
+      });
+    } catch (err) {
+      strapi.log.warn(
+        `[translate] ${locale} saved but its translation baseline was not recorded: ${err.message}`,
+      );
+    }
+    return result;
+  };
   const summaries = (ops, tree) => {
     const modules = new Map();
     for (const op of ops) {
@@ -65,9 +125,11 @@ export default ({ strapi }) => {
       if (installed || !strapi.documents?.use) return;
       installed = true;
       strapi.documents.use(async (ctx, next) => {
+        // A new collection entry (or a single type's first save) arrives as
+        // `create`; later saves arrive as `update`.
+        const creating = ctx.action === "create";
         if (
-          ctx.action !== "update" ||
-          !ctx.params.documentId ||
+          (!creating && (ctx.action !== "update" || !ctx.params.documentId)) ||
           !ctx.contentType?.pluginOptions?.i18n?.localized ||
           state().isTranslation()
         )
@@ -78,34 +140,47 @@ export default ({ strapi }) => {
         // Even ordinary target edits take the lock used by preview acceptance.
         // The source save and its change record become visible together.
         return state().transaction(async ({ trx }) => {
-          await state().lockDocuments(trx, [
-            { uid: ctx.uid, documentId: ctx.params.documentId },
-          ]);
-          if (!enabled(ctx.uid, locale)) return next();
+          if (!creating)
+            await state().lockDocuments(trx, [
+              { uid: ctx.uid, documentId: ctx.params.documentId },
+            ]);
+          if (!enabled(ctx.uid, locale))
+            return creating ? next() : adoptTarget(ctx, locale, trx, next);
           let previous, before;
           try {
-            previous = await load(ctx.uid, ctx.params.documentId, locale);
-            if (previous) before = snapshot(strapi, ctx.uid, previous);
+            // Everything saved into a new document counts as changed.
+            if (creating) before = snapshot(strapi, ctx.uid, {});
+            else {
+              previous = await load(ctx.uid, ctx.params.documentId, locale);
+              if (previous) before = snapshot(strapi, ctx.uid, previous);
+            }
           } catch (err) {
             strapi.log.warn(
               `[translate] change tracking unavailable before save: ${err.message}`,
             );
           }
           const result = await next();
-          if (!before) return result;
+          const documentId = creating
+            ? result?.documentId
+            : ctx.params.documentId;
+          if (!before || !documentId) return result;
           // A savepoint isolates metadata failures from the editor's source
           // save. The source remains saved, and Retry can persist this record.
           /** @type {any} */
           let pending;
           try {
             await trx.transaction(async () => {
-              const current = await load(
-                ctx.uid,
-                ctx.params.documentId,
-                locale,
-              );
+              const current = await load(ctx.uid, documentId, locale);
               if (!current) return;
               const after = snapshot(strapi, ctx.uid, current);
+              // Empty strings and empty relation/media lists are not new
+              // content.
+              if (creating)
+                for (const [key, field] of Object.entries(before.fields)) {
+                  const value = after.fields[key]?.value;
+                  if (value === "" || (Array.isArray(value) && !value.length))
+                    field.value = value;
+                }
               if (!operations(before, after).length) return;
               const key = sourceKey(ctx.uid, current.documentId, locale);
               const record = recoveries.get(key) || (await state().read(key));
@@ -120,6 +195,7 @@ export default ({ strapi }) => {
                   current: after,
                   revision: fingerprint(after),
                   savedAt: Date.now(),
+                  action: ctx.action,
                   actingUserId:
                     strapi.requestContext?.get()?.state?.user?.id || null,
                 },
@@ -170,6 +246,8 @@ export default ({ strapi }) => {
           )
         : null;
       let ops = operations(baseline?.snapshot || record.initial, tree);
+      // Per-language status lets editors see which versions are behind.
+      const languages = [];
       if (!targetLocale) {
         const locales = await strapi
           .plugin("translate")
@@ -181,16 +259,26 @@ export default ({ strapi }) => {
           const targetBaseline = await state().read(
             baselineKey(uid, documentId, sourceLocale, locale),
           );
-          for (const op of operations(
+          const behind = operations(
             targetBaseline?.snapshot || record.initial,
             tree,
-          ))
-            pending.set(op.id, op);
+          );
+          for (const op of behind) pending.set(op.id, op);
+          const exists = !!(await strapi.db
+            .query(uid)
+            .findOne({ where: { documentId, locale }, select: ["id"] }));
+          languages.push({
+            locale,
+            exists,
+            modules: [...new Set(behind.map((op) => op.moduleKey))],
+          });
         }
         ops = [...pending.values()];
       }
       const cfg = strapi.plugin("translate").config || {};
+      // Automatic rules react to updates, not to a new entry's first save.
       const automatic =
+        record.action !== "create" &&
         cfg.autoTranslate?.enabled !== false &&
         cfg.autoTranslate?.rules?.some(
           (r) =>
@@ -205,6 +293,7 @@ export default ({ strapi }) => {
         shouldPrompt:
           !automatic && !!actingUserId && actingUserId === record.actingUserId,
         modules: summaries(ops, tree),
+        ...(targetLocale ? {} : { languages }),
       };
     },
     async prepare({

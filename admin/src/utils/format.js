@@ -50,3 +50,10 @@ export const renderDiffValue = (v) => {
     return { text: "(empty)", muted: true };
   return { text: truncate(v), muted: false };
 };
+
+// Top-level fields arrive as their own modules, labelled with the raw
+// attribute name ("title"); show them like the editor's field labels.
+export const moduleLabel = (module) =>
+  module.key?.startsWith("root/")
+    ? humanizeSegment(module.label)
+    : module.label;

@@ -59,21 +59,18 @@ try {
   const title = page.locator('input[name="modules.1.title"]');
   await title.waitFor();
   await page
-    .getByText(
-      "No pending changes. Save an edit to translate just the modules you changed.",
-      {
-        exact: true,
-      },
-    )
+    .getByText("All languages are up to date.", {
+      exact: true,
+    })
     .waitFor();
   await capture(page, "before-editor.png");
   await title.fill("Entdecke unsere neuesten Reisetipps");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByRole("dialog").waitFor({ timeout: 20000 });
-  assert.match(
-    await page.getByRole("dialog").innerText(),
-    /Translate saved changes/,
-  );
+  const savePrompt = await page.getByRole("dialog").innerText();
+  assert.match(savePrompt, /Translate saved changes/);
+  // Each language shows how many of the selected changes it still needs.
+  assert.match(savePrompt, /English \(en\)\s*1 change/i);
   await page.getByRole("checkbox", { name: /^English/ }).check();
   await page.waitForFunction(() => {
     const button = [...document.querySelectorAll("button")].find(
@@ -146,6 +143,16 @@ try {
   await capture(page, "after-module-preview.png");
   await page.getByRole("button", { name: /^Apply to English/ }).click();
   await page.getByText(/^English.* updated$/).waitFor({ timeout: 15000 });
+  await capture(page, "after-apply-open.png");
+  const openHref = await page
+    .getByRole("link", { name: "Open English (en)" })
+    .getAttribute("href");
+  assert.ok(
+    openHref.endsWith(
+      `/admin/content-manager/collection-types/api::page.page/${documentId}?plugins[i18n][locale]=en`,
+    ),
+    openHref,
+  );
   const targetResponse = await page.request.get(
     `${base}/content-manager/collection-types/api::page.page/${documentId}?locale=en`,
     { headers },
@@ -182,7 +189,7 @@ try {
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByRole("dialog").waitFor();
   await page.getByRole("checkbox", { name: /^English/ }).check();
-  await page.getByRole("checkbox", { name: "French", exact: true }).check();
+  await page.getByRole("checkbox", { name: /^French/ }).check();
   await page
     .getByRole("button", { name: "Preview translations", exact: true })
     .click();
@@ -266,7 +273,7 @@ try {
     .getByRole("button", { name: "Translate changes", exact: true })
     .click();
   await page.getByRole("checkbox", { name: /^English/ }).uncheck();
-  await page.getByRole("checkbox", { name: "French", exact: true }).check();
+  await page.getByRole("checkbox", { name: /^French/ }).check();
   await page
     .getByRole("checkbox", {
       name: "Also translate linked items",
@@ -304,9 +311,78 @@ try {
   const savedChild = (await childResponse.json()).data;
   assert.equal(savedChild.locale, "fr");
   assert.equal(savedChild.related.count, 0);
+  // A failed create does not prompt on the next entry the editor opens.
+  const createPage = `${base}/admin/content-manager/collection-types/api::article.article/create?plugins[i18n][locale]=de`;
+  await page.goto(createPage);
+  await page.getByRole("button", { name: "Save", exact: true }).waitFor();
+  await page.locator('input[name="title"]').fill("Abgebrochen");
+  const failCreate = (route) =>
+    route.request().method() === "POST" ? route.abort() : route.continue();
+  await page.route("**/collection-types/api::article.article?*", failCreate);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.waitForTimeout(1500);
+  await page.unroute("**/collection-types/api::article.article?*", failCreate);
+  // Client-side navigation keeps the admin's module state, like a click would.
+  await page.evaluate((to) => {
+    window.history.pushState({}, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, `/admin/content-manager/collection-types/api::article.article/${articleA.documentId}?plugins[i18n][locale]=de`);
+  await page.getByText("Translation changes").first().waitFor();
+  await page.waitForTimeout(3000);
+  assert.equal(await page.getByRole("dialog").count(), 0);
+  // Saving a new collection entry prompts like saving an existing one.
+  await page.goto(
+    `${base}/admin/content-manager/collection-types/api::article.article/create?plugins[i18n][locale]=de`,
+  );
+  await page.getByRole("button", { name: "Save", exact: true }).waitFor();
+  await page.locator('input[name="title"]').fill("Neue Hütte");
+  await page.locator('textarea[name="body"]').fill("Ein Bett im Heu.");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("dialog").waitFor({ timeout: 20000 });
+  await page.getByText(/only exists in German so far/).waitFor();
+  // Let locale names and the estimate settle before the capture.
+  await page.waitForTimeout(1000);
+  await capture(page, "after-new-entry-prompt.png");
+  const createdPrompt = await page.getByRole("dialog").innerText();
+  assert.match(createdPrompt, /Translate saved changes/);
+  assert.match(createdPrompt, /title[\s\S]*body|body[\s\S]*title/i);
+  assert.doesNotMatch(createdPrompt, /related/i);
+  // A deleted language stays visible so it can be translated again.
+  const synced = await createArticle({ title: "Alm", body: "Hütte" });
+  for (const locale of ["en", "fr"]) {
+    const response = await page.request.put(
+      `${base}/content-manager/collection-types/api::article.article/${synced.documentId}?locale=${locale}`,
+      { headers, data: { title: `Alm ${locale}`, body: `Hut ${locale}` } },
+    );
+    assert.ok(response.ok(), await response.text());
+  }
+  const removed = await page.request.delete(
+    `${base}/content-manager/collection-types/api::article.article/${synced.documentId}?locale=fr`,
+    { headers },
+  );
+  assert.ok(removed.ok(), await removed.text());
+  await page.goto(
+    `${base}/admin/content-manager/collection-types/api::article.article/${synced.documentId}?plugins[i18n][locale]=de`,
+  );
+  await page
+    .getByText(/not created yet/i)
+    .first()
+    .waitFor();
+  await capture(page, "after-language-status.png");
+  await page.getByRole("button", { name: "Translate changes" }).click();
+  await page.getByText(/Every existing language is up to date/).waitFor();
+  await capture(page, "after-missing-language.png");
+  assert.equal(
+    await page.getByRole("checkbox", { name: /^English/ }).isDisabled(),
+    true,
+  );
+  assert.equal(
+    await page.getByRole("checkbox", { name: /^French/ }).isDisabled(),
+    false,
+  );
   assert.deepEqual(errors, []);
   console.log(
-    "PASS real admin saves, desktop/mobile previews, two-language acceptance, parent/child optional-link approvals, and preserved manual copy.",
+    "PASS real admin saves, desktop/mobile previews, two-language acceptance, parent/child optional-link approvals, preserved manual copy, and new-entry prompts.",
   );
 } catch (error) {
   await page
