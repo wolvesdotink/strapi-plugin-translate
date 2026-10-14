@@ -481,6 +481,81 @@ try {
     "PASS validation repair stages revised text for review before saving it",
   );
 
+  // New collection entries are tracked from their first save, so the editor
+  // gets the same prompt as after an update of an existing entry.
+  const articleUid = "api::article.article";
+  const created = await app.documents(articleUid).create({
+    locale: "de",
+    data: { title: "Neue Hütte", body: "Ein Bett im Heu." },
+  });
+  const pendingKeys = async (targetLocale) =>
+    (
+      await svc("changes").get({
+        uid: articleUid,
+        documentId: created.documentId,
+        sourceLocale: "de",
+        targetLocale,
+      })
+    ).modules
+      .map((m) => m.key)
+      .sort();
+  const fresh = await svc("changes").get({
+    uid: articleUid,
+    documentId: created.documentId,
+    sourceLocale: "de",
+  });
+  // The empty `related` list is not new content.
+  assert.deepEqual(fresh.modules.map((m) => m.key).sort(), [
+    "root/body",
+    "root/title",
+  ]);
+  const status = (changes) =>
+    Object.fromEntries(
+      changes.languages.map((l) => [l.locale, [l.exists, l.modules.length]]),
+    );
+  assert.deepEqual(status(fresh), { en: [false, 2], fr: [false, 2] });
+  const initial = await svc("selective-preview").create({
+    uid: articleUid,
+    documentId: created.documentId,
+    sourceLocale: "de",
+    targetLocale: "en",
+    revision: fresh.revision,
+    initialTranslation: true,
+  });
+  await svc("selective-preview").accept(initial.previewId);
+  assert.equal(
+    (await svc("changes").load(articleUid, created.documentId, "en")).title,
+    "[en] Neue Hütte",
+  );
+  assert.deepEqual(await pendingKeys("en"), []);
+  // A language written by hand starts in sync with the source.
+  await app.documents(articleUid).update({
+    documentId: created.documentId,
+    locale: "fr",
+    data: { title: "Nouvelle cabane", body: "Un lit dans le foin." },
+  });
+  assert.deepEqual(await pendingKeys("fr"), []);
+  await app.documents(articleUid).update({
+    documentId: created.documentId,
+    locale: "de",
+    data: { body: "Zwei Betten im Heu." },
+  });
+  assert.deepEqual(await pendingKeys("en"), ["root/body"]);
+  assert.deepEqual(await pendingKeys("fr"), ["root/body"]);
+  assert.deepEqual(
+    status(
+      await svc("changes").get({
+        uid: articleUid,
+        documentId: created.documentId,
+        sourceLocale: "de",
+      }),
+    ),
+    { en: [true, 1], fr: [true, 1] },
+  );
+  console.log(
+    "PASS new entries are tracked from creation, hand-written languages start in sync, and per-language status is reported",
+  );
+
   // Existing automatic rules use the scoped engine and fire after the source
   // tracking transaction commits, without a duplicate interactive prompt.
   app.plugin("translate").config.autoTranslate = {
@@ -523,6 +598,23 @@ try {
       })
     ).shouldPrompt,
     false,
+  );
+  // Update rules do not run on a new entry's first save, so its prompt stays.
+  const createdPage = await app.requestContext.run(
+    { state: { user: { id: 1 } } },
+    () =>
+      app.documents(uid).create({ locale: "de", data: { title: "Neu" } }),
+  );
+  assert.equal(
+    (
+      await svc("changes").get({
+        uid,
+        documentId: createdPage.documentId,
+        sourceLocale: "de",
+        actingUserId: 1,
+      })
+    ).shouldPrompt,
+    true,
   );
   console.log(
     "PASS automatic propagation uses selective patches after commit and preserves manual module content",

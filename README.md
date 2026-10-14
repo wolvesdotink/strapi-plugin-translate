@@ -241,6 +241,10 @@ Update rules reuse the selective engine after saved change tracking commits. Whe
 
 The new **Translation changes** panel complements the existing full-document action. Save an edit in your source language to open **Translate saved changes**. Choose the changed modules and one or more languages, generate previews, review each language, and apply its approved changes. **Not now** keeps pending work available in the panel, which lists the changed modules and reopens the dialog with **Translate changes**. A language skipped on one save still receives its earlier unapplied changes when selected later.
 
+This works the same for single types and collection entries. Saving a new entry opens the dialog with everything it contains; turn on **Create missing languages** to create its translations. A language written by hand counts as in sync with the source at the time it was added, so later saves list only what changed after that.
+
+The panel and the language picker show each language's status: up to date, how many changes it still needs, or not created yet. A language with nothing to translate in the current selection can't be picked. After applying, **Open {language}** opens that version in a new tab so you can check it and publish it yourself. The plugin never publishes a draft; content types without drafts change as soon as you apply.
+
 The popup is enabled for `settings.sourceLocale` (German by default). Configure its scope in `config/plugins.js`:
 
 ```js
@@ -318,6 +322,10 @@ These screenshots show the current plugin in the Strapi 5.57 admin using a dispo
 ![After: English content with untouched manual copy](docs/screenshots/after-english-content.png)
 ![After: a French link that has no localized item yet must be resolved or explicitly omitted](docs/screenshots/after-missing-link.png)
 ![Review optional missing links on a linked-item preview](docs/screenshots/after-linked-item-preview.png)
+![Saving a new collection entry offers to create its translations](docs/screenshots/after-new-entry-prompt.png)
+![After applying, open the translated version to check and publish it](docs/screenshots/after-apply-open.png)
+![The panel shows which languages are up to date, behind, or missing](docs/screenshots/after-language-status.png)
+![A deleted language can be translated again while up-to-date languages stay locked](docs/screenshots/after-missing-language.png)
 
 <details>
 <summary>Mobile language selection and module preview</summary>

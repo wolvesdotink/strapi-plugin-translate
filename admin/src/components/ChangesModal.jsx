@@ -6,6 +6,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
+import { useHref } from "react-router-dom";
 import { useFetchClient } from "@strapi/strapi/admin";
 import {
   Alert,
@@ -14,6 +15,7 @@ import {
   Button,
   Checkbox,
   Flex,
+  LinkButton,
   Modal,
   SingleSelect,
   SingleSelectOption,
@@ -37,6 +39,7 @@ import {
   formatTokens,
   humanizePath,
   humanizeSegment,
+  moduleLabel,
   renderDiffValue,
 } from "../utils/format";
 
@@ -65,6 +68,18 @@ const RELATION_BADGE = {
 // Toggle id for a preview field. Fields added with a new module share the
 // structural operation that inserts it.
 const opId = (field) => field.operationId || field.id;
+const isEmpty = (value) =>
+  value == null || value === "" || (Array.isArray(value) && value.length === 0);
+// A new language lists every field; leave out empty ones that stay empty.
+const shownFields = (row, fields) =>
+  row.initialTranslation
+    ? fields.filter(
+        (field) =>
+          !isEmpty(field.source) ||
+          !isEmpty(field.before) ||
+          !isEmpty(field.after),
+      )
+    : fields;
 const isExcluded = (excluded, row, field) =>
   !!excluded[row.previewId]?.[opId(field)];
 
@@ -207,6 +222,7 @@ export function ChangesModal({
   open,
   onClose,
   model,
+  collectionType,
   documentId,
   sourceLocale,
   changes,
@@ -253,6 +269,13 @@ export function ChangesModal({
   );
   const localeName = (code) =>
     allLocales.find((l) => l.code === code)?.name || code;
+  // The applied version opens in a new tab so the remaining languages stay
+  // in this dialog.
+  const versionHref = useHref(
+    collectionType === "single-types"
+      ? `/content-manager/single-types/${model}?plugins[i18n][locale]=${active}`
+      : `/content-manager/collection-types/${model}/${documentId}?plugins[i18n][locale]=${active}`,
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -328,19 +351,40 @@ export function ChangesModal({
     };
   }, [jobId, phase, get]);
 
-  const missingTargets = targets.filter(
-    (code) => localeStatus && localeStatus[code] && !localeStatus[code].exists,
+  // A language that already has every selected change has nothing to
+  // preview; it stays visible but can't be picked.
+  const languageStatus = Object.fromEntries(
+    (changes?.languages || []).map((l) => [l.locale, l]),
   );
+  const pendingIn = (code) =>
+    languageStatus[code]?.modules.filter((key) => modules.includes(key))
+      .length ?? null;
+  // `changes.languages` refreshes after each apply; the locale-status
+  // response is only loaded when the dialog opens.
+  const exists = (code) =>
+    languageStatus[code]
+      ? languageStatus[code].exists
+      : (localeStatus?.[code]?.exists ?? true);
+  const actionable = (code) => !exists(code) || pendingIn(code) > 0;
+  const sendTargets = targets.filter(actionable);
+  const sendKey = sendTargets.join(",");
+  const onlySource =
+    !!changes?.languages?.length && changes.languages.every((l) => !l.exists);
+
+  const missingTargets = sendTargets.filter((code) => !exists(code));
   // These languages can only be previewed as a full initial translation.
   const needsInitial = initial ? [] : missingTargets;
   // Without status information the option stays visible so the editor can
   // still recover from a "no page exists" error.
-  const showInitial = !localeStatus || missingTargets.length > 0 || initial;
+  const showInitial =
+    (!localeStatus && !changes?.languages) ||
+    missingTargets.length > 0 ||
+    initial;
 
   useEffect(() => {
     if (
       phase !== "pick" ||
-      !targets.length ||
+      !sendTargets.length ||
       !modules.length ||
       needsInitial.length
     ) {
@@ -356,7 +400,7 @@ export function ChangesModal({
           uid: model,
           documentId,
           sourceLocale,
-          targetLocales: targets,
+          targetLocales: sendTargets,
           moduleKeys: modules,
           revision: changes.revision,
           initialTranslation: initial,
@@ -380,7 +424,7 @@ export function ChangesModal({
     };
   }, [
     phase,
-    targets,
+    sendKey,
     modules,
     initial,
     linked,
@@ -403,7 +447,7 @@ export function ChangesModal({
   }, [changes.revision]);
 
   const start = async () => {
-    if (!targets.length || (!modules.length && !initial)) return;
+    if (!sendTargets.length || (!modules.length && !initial)) return;
     setBusy(true);
     setError(null);
     setExcluded({});
@@ -423,7 +467,7 @@ export function ChangesModal({
         uid: model,
         documentId,
         sourceLocale,
-        targetLocales: targets,
+        targetLocales: sendTargets,
         revision: changes.revision,
         moduleKeys: modules,
         translateLinkedItems: linked,
@@ -590,86 +634,102 @@ export function ChangesModal({
   const renderPick = () => (
     <>
       <Typography variant="omega" textColor="neutral600">
-        {t(
-          "intro",
-          "Pick the modules to send for translation. Everything else in the translated versions stays as it is.",
-        )}
+        {onlySource
+          ? t(
+              "introNew",
+              "This entry only exists in {language} so far. Pick the languages to create it in. You review every translation before anything is saved.",
+              { language: localeName(sourceLocale) },
+            )
+          : !(changes?.modules || []).length
+            ? t(
+                "introMissing",
+                "Every existing language is up to date. Pick the missing languages to create this entry in. You review every translation before anything is saved.",
+              )
+            : t(
+                "intro",
+                "Pick the modules to send for translation. Everything else in the translated versions stays as it is.",
+              )}
       </Typography>
 
-      <Flex direction="column" alignItems="stretch" gap={2}>
-        <SectionLabel
-          aside={
-            (changes?.modules || []).length > 1 && (
-              <TextButton
-                onClick={() =>
-                  setModules(
-                    allModulesSelected
-                      ? []
-                      : (changes.modules || []).map((m) => m.key),
-                  )
+      {(changes?.modules || []).length > 0 && (
+        <Flex direction="column" alignItems="stretch" gap={2}>
+          <SectionLabel
+            aside={
+              (changes?.modules || []).length > 1 && (
+                <TextButton
+                  onClick={() =>
+                    setModules(
+                      allModulesSelected
+                        ? []
+                        : (changes.modules || []).map((m) => m.key),
+                    )
+                  }
+                >
+                  {allModulesSelected
+                    ? t("selectNone", "Clear selection")
+                    : t("selectAll", "Select all")}
+                </TextButton>
+              )
+            }
+          >
+            {t("modules", "Changed modules")}
+          </SectionLabel>
+          <Card>
+            {(changes?.modules || []).map((module, i) => (
+              <Box
+                key={module.key}
+                paddingTop={3}
+                paddingBottom={3}
+                paddingLeft={4}
+                paddingRight={4}
+                borderColor="neutral200"
+                style={
+                  i > 0
+                    ? { borderTopWidth: 1, borderTopStyle: "solid" }
+                    : undefined
                 }
               >
-                {allModulesSelected
-                  ? t("selectNone", "Clear selection")
-                  : t("selectAll", "Select all")}
-              </TextButton>
-            )
-          }
-        >
-          {t("modules", "Changed modules")}
-        </SectionLabel>
-        <Card>
-          {(changes?.modules || []).map((module, i) => (
-            <Box
-              key={module.key}
-              paddingTop={3}
-              paddingBottom={3}
-              paddingLeft={4}
-              paddingRight={4}
-              borderColor="neutral200"
-              style={
-                i > 0
-                  ? { borderTopWidth: 1, borderTopStyle: "solid" }
-                  : undefined
-              }
-            >
-              <Option
-                checked={modules.includes(module.key)}
-                onCheckedChange={(checked) =>
-                  toggle(setModules, module.key, checked)
-                }
-                label={
-                  <Typography variant="omega" fontWeight="semiBold">
-                    {module.label}
-                  </Typography>
-                }
-                hint={[
-                  humanizePath(module.path),
-                  module.fields
-                    .map((field) =>
-                      field.kind === "structure"
-                        ? t("structureChange", "{name} order", {
-                            name: humanizeSegment(field.name),
-                          })
-                        : humanizeSegment(field.name),
-                    )
-                    .join(", "),
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              />
-            </Box>
-          ))}
-        </Card>
-      </Flex>
+                <Option
+                  checked={modules.includes(module.key)}
+                  onCheckedChange={(checked) =>
+                    toggle(setModules, module.key, checked)
+                  }
+                  label={
+                    <Typography variant="omega" fontWeight="semiBold">
+                      {moduleLabel(module)}
+                    </Typography>
+                  }
+                  hint={[
+                    humanizePath(module.path),
+                    module.fields
+                      .map((field) =>
+                        field.kind === "structure"
+                          ? t("structureChange", "{name} order", {
+                              name: humanizeSegment(field.name),
+                            })
+                          : humanizeSegment(field.name),
+                      )
+                      .join(", "),
+                  ]
+                    // A top-level field would repeat its own name.
+                    .filter((part) => part && part !== moduleLabel(module))
+                    .filter((part, i, parts) => parts.indexOf(part) === i)
+                    .join(" · ")}
+                />
+              </Box>
+            ))}
+          </Card>
+        </Flex>
+      )}
 
       <Flex direction="column" alignItems="stretch" gap={2}>
         <SectionLabel>{t("languages", "Translate into")}</SectionLabel>
         <Flex wrap="wrap" gap={2}>
           {locales.map((locale) => {
-            const checked = targets.includes(locale.code);
-            const missing =
-              localeStatus?.[locale.code] && !localeStatus[locale.code].exists;
+            const enabled = actionable(locale.code);
+            const checked = enabled && targets.includes(locale.code);
+            const missing = !exists(locale.code);
+            const pending = missing ? null : pendingIn(locale.code);
             return (
               <Box
                 key={locale.code}
@@ -685,13 +745,14 @@ export function ChangesModal({
               >
                 <Checkbox
                   checked={checked}
+                  disabled={!enabled}
                   onCheckedChange={(value) =>
                     toggle(setTargets, locale.code, value)
                   }
                 >
                   <Flex gap={2} alignItems="center" tag="span">
                     {locale.name || locale.code}
-                    {missing && (
+                    {missing ? (
                       <Badge
                         size="S"
                         backgroundColor="warning100"
@@ -699,7 +760,21 @@ export function ChangesModal({
                       >
                         {t("noVersion", "Not created yet")}
                       </Badge>
-                    )}
+                    ) : pending === 0 ? (
+                      <Badge size="S">
+                        {languageStatus[locale.code].modules.length
+                          ? t("notSelected", "No selected changes")
+                          : t("upToDate", "Up to date")}
+                      </Badge>
+                    ) : pending ? (
+                      <Badge size="S">
+                        {t(
+                          "pendingCount",
+                          "{count, plural, one {# change} other {# changes}}",
+                          { count: pending },
+                        )}
+                      </Badge>
+                    ) : null}
                   </Flex>
                 </Checkbox>
               </Box>
@@ -733,7 +808,7 @@ export function ChangesModal({
               missingTargets.length
                 ? t(
                     "initialHelpMissing",
-                    "{languages} {count, plural, one {doesn't} other {don't}} have this entry yet. Turn this on to create it with a full translation.",
+                    "{languages} {count, plural, one {doesn't} other {don't}} have this entry yet. Turn this on to create {count, plural, one {it} other {them}} with a translation of the whole entry, including anything not selected above. You review it before anything is saved.",
                     {
                       languages: missingTargets.map(localeName).join(", "),
                       count: missingTargets.length,
@@ -809,7 +884,7 @@ export function ChangesModal({
       <Flex direction="column" alignItems="stretch" gap={1}>
         {(
           job?.targets ||
-          targets.map((locale) => ({ locale, state: "pending" }))
+          sendTargets.map((locale) => ({ locale, state: "pending" }))
         ).map((item) => {
           const { Icon, color } = STATE_ICON[item.state] || STATE_ICON.pending;
           return (
@@ -1055,6 +1130,8 @@ export function ChangesModal({
           const relations = (row.relations || []).filter((r) =>
             module.keys.includes(r.moduleKey),
           );
+          const fields = shownFields(row, module.fields);
+          if (!fields.length && !relations.length) return null;
           return (
             <Card key={module.key} shadow="tableShadow">
               <Flex
@@ -1080,7 +1157,7 @@ export function ChangesModal({
                   )}
                 </Box>
               </Flex>
-              {module.fields.map((field) => renderField(row, field, locked))}
+              {fields.map((field) => renderField(row, field, locked))}
               {relations.length > 0 && (
                 <Box
                   padding={4}
@@ -1278,11 +1355,20 @@ export function ChangesModal({
         <Typography variant="pi" textColor="neutral700" textAlign="center">
           {t(
             "appliedHelp",
-            "The approved changes are saved. If this content uses drafts, publish it when you're ready.",
+            "The approved changes are saved. If this content uses drafts, visitors see them only after you publish {language}.",
+            { language: localeName(active) },
           )}
         </Typography>
-        {nextLocale && (
-          <Box paddingTop={2}>
+        <Flex paddingTop={2} gap={2} wrap="wrap" justifyContent="center">
+          <LinkButton
+            variant="tertiary"
+            href={versionHref}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {t("open", "Open {language}", { language: localeName(active) })}
+          </LinkButton>
+          {nextLocale && (
             <Button
               variant="secondary"
               endIcon={<ArrowRight />}
@@ -1295,8 +1381,8 @@ export function ChangesModal({
                 language: localeName(nextLocale),
               })}
             </Button>
-          </Box>
-        )}
+          )}
+        </Flex>
       </Flex>
     </Box>
   );
@@ -1454,7 +1540,7 @@ export function ChangesModal({
             <Button
               onClick={start}
               loading={busy}
-              disabled={!targets.length || (!modules.length && !initial)}
+              disabled={!sendTargets.length || (!modules.length && !initial)}
             >
               {t("generate", "Preview translations")}
             </Button>

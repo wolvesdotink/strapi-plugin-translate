@@ -730,7 +730,9 @@ export default ({ strapi }) => {
           const target = await changes.load(body.uid, body.documentId, locale);
           if (target ? checker.can.read(target) && checker.can.update(target) : checker.can.create({ locale })) targetLocales.push(locale);
         }
-        ctx.body = { ...out, targetLocales };
+        // Status is only shown for languages this editor may translate into.
+        const languages = out.languages?.filter((l) => targetLocales.includes(l.locale));
+        ctx.body = { ...out, ...(languages ? { languages } : {}), targetLocales };
       } catch (err) { fail(ctx, err); }
     },
 
