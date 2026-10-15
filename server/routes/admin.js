@@ -57,6 +57,12 @@ export default [
   { method: "POST", path: "/changes", handler: "translate.getChanges", config: { policies: contentPermissions() } },
   {
     method: "POST",
+    path: "/changes/alignment",
+    handler: "translate.getAlignment",
+    config: { policies: contentPermissions() },
+  },
+  {
+    method: "POST",
     path: "/document",
     handler: "translate.translateDocument",
     config: { policies: contentPermissions() },

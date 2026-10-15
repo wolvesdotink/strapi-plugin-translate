@@ -1,6 +1,8 @@
 // Save-triggered dialog for translating only the modules that changed.
-// Three phases:
+// Four phases:
 //   pick    — choose changed modules, target languages and options
+//   match   — confirm which translated module belongs to each source module
+//             when a language can't tell same-type modules apart
 //   running — per-language progress while previews are generated
 //   review  — one tab per language: approve individual changes, then apply
 
@@ -29,6 +31,7 @@ import {
   Clock,
   Cross,
   CrossCircle,
+  Information,
   Link as LinkIcon,
   Loader,
   WarningCircle,
@@ -49,6 +52,8 @@ const message = (error) =>
   "Translation failed";
 
 const FINISHED = ["done", "partial", "failed", "cancelled"];
+// Pick for a removed module the translation doesn't have (any more).
+const NONE = "__none__";
 
 const STATE_ICON = {
   pending: { Icon: Clock, color: "neutral500" },
@@ -162,6 +167,7 @@ const Card = ({ children, ...props }) => (
 );
 
 const NOTICE = {
+  info: { Icon: Information, tone: "primary" },
   warning: { Icon: WarningCircle, tone: "warning" },
   danger: { Icon: CrossCircle, tone: "danger" },
 };
@@ -218,6 +224,108 @@ const groupModules = (modules = []) => {
   return groups;
 };
 
+// Uploads are served by the backend, which can differ from the admin host.
+const fileUrl = (url) =>
+  url?.startsWith("/") ? `${window.strapi?.backendURL || ""}${url}` : url;
+const fieldName = (path) =>
+  path
+    .filter((part) => !/^\d+$/.test(part))
+    .slice(-1)
+    .map(humanizeSegment)[0];
+
+// The first readable line of a module, for compact option labels.
+const excerpt = (content, max = 70) => {
+  const text =
+    content?.texts?.[0]?.text ||
+    content?.links?.[0] ||
+    content?.media?.find((m) => m.name)?.name ||
+    "";
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+};
+
+// What a module says: its texts, images and linked items.
+const ModuleContent = ({ content, emptyLabel, moreLabel, linksLabel }) => {
+  const texts = content?.texts || [];
+  const media = content?.media || [];
+  const links = content?.links || [];
+  if (!texts.length && !media.length && !links.length)
+    return (
+      <Typography
+        variant="pi"
+        textColor="neutral500"
+        style={{ fontStyle: "italic" }}
+      >
+        {emptyLabel}
+      </Typography>
+    );
+  const shown = texts.slice(0, 4);
+  return (
+    <Flex direction="column" alignItems="stretch" gap={2}>
+      {shown.map((field, i) => (
+        <Box key={i}>
+          <Typography variant="sigma" textColor="neutral500" tag="p">
+            {fieldName(field.name)}
+          </Typography>
+          <Typography
+            variant="omega"
+            textColor="neutral800"
+            tag="p"
+            style={{
+              wordBreak: "break-word",
+              display: "-webkit-box",
+              WebkitLineClamp: 3,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {field.text}
+          </Typography>
+        </Box>
+      ))}
+      {texts.length > shown.length && (
+        <Typography variant="pi" textColor="neutral500">
+          {moreLabel(texts.length - shown.length)}
+        </Typography>
+      )}
+      {media.length > 0 && (
+        <Flex gap={2} wrap="wrap">
+          {media.slice(0, 4).map((file, i) =>
+            file.url ? (
+              <img
+                key={i}
+                src={fileUrl(file.url)}
+                alt={file.name || ""}
+                title={file.name || ""}
+                style={{
+                  width: 64,
+                  height: 48,
+                  objectFit: "cover",
+                  borderRadius: 4,
+                  border: "1px solid var(--neutral200, #dcdce4)",
+                }}
+              />
+            ) : (
+              <Badge key={i} size="S">
+                {file.name}
+              </Badge>
+            ),
+          )}
+        </Flex>
+      )}
+      {links.length > 0 && (
+        <Flex gap={2} alignItems="flex-start">
+          <Box color="neutral500" paddingTop={1} aria-hidden>
+            <LinkIcon width="1.2rem" height="1.2rem" />
+          </Box>
+          <Typography variant="pi" textColor="neutral700">
+            {linksLabel(links)}
+          </Typography>
+        </Flex>
+      )}
+    </Flex>
+  );
+};
+
 export function ChangesModal({
   open,
   onClose,
@@ -251,6 +359,8 @@ export function ChangesModal({
   const [excluded, setExcluded] = useState({});
   const [omit, setOmit] = useState({});
   const [alignments, setAlignments] = useState({});
+  const [matchRows, setMatchRows] = useState({});
+  const [matchLocale, setMatchLocale] = useState(null);
   const [applied, setApplied] = useState({});
   const [estimate, setEstimate] = useState(null);
   const [estimateError, setEstimateError] = useState(null);
@@ -285,6 +395,8 @@ export function ChangesModal({
     setJob(null);
     setJobId(null);
     setApplied({});
+    setAlignments({});
+    setMatchRows({});
     setModules((changes?.modules || []).map((m) => m.key));
     get("/translate/locales")
       .then(({ data }) => {
@@ -446,8 +558,8 @@ export function ChangesModal({
     });
   }, [changes.revision]);
 
-  const start = async () => {
-    if (!sendTargets.length || (!modules.length && !initial)) return;
+  const start = async (chosen, targetLocales = sendTargets) => {
+    if (!targetLocales.length || (!modules.length && !initial)) return;
     setBusy(true);
     setError(null);
     setExcluded({});
@@ -467,12 +579,12 @@ export function ChangesModal({
         uid: model,
         documentId,
         sourceLocale,
-        targetLocales: sendTargets,
+        targetLocales,
         revision: changes.revision,
         moduleKeys: modules,
         translateLinkedItems: linked,
         initialTranslation: initial,
-        alignments,
+        alignments: chosen,
       });
       setJobId(data.jobId);
       setJob(null);
@@ -483,6 +595,137 @@ export function ChangesModal({
       setBusy(false);
     }
   };
+  // Pre-select the suggested pair for every module that still needs one.
+  // Earlier picks stay only while they are still among the candidates.
+  const withSuggestions = (current, found) => {
+    const next = { ...current };
+    for (const [locale, rows] of found) {
+      const picks = { ...next[locale] };
+      for (const row of rows)
+        if (
+          !(row.removed && picks[row.sourceKey] === NONE) &&
+          !row.candidates.some((c) => c.key === picks[row.sourceKey])
+        ) {
+          if (row.suggested) picks[row.sourceKey] = row.suggested;
+          else delete picks[row.sourceKey];
+        }
+      next[locale] = picks;
+    }
+    return next;
+  };
+  const openMatch = (found, chosen, merge) => {
+    setAlignments(chosen);
+    setMatchRows((current) => {
+      const next = merge ? { ...current } : {};
+      for (const [locale, rows] of found) {
+        const fresh = new Map(rows.map((row) => [row.sourceKey, row]));
+        const known = new Set((next[locale] || []).map((r) => r.sourceKey));
+        next[locale] = [
+          ...(next[locale] || []).map((row) => fresh.get(row.sourceKey) || row),
+          ...rows.filter((row) => !known.has(row.sourceKey)),
+        ];
+      }
+      return next;
+    });
+    setMatchLocale((current) =>
+      merge && found.some(([locale]) => locale === current)
+        ? current
+        : found[0][0],
+    );
+    setPhase("match");
+  };
+  // Picks for the rows on screen; stale picks from earlier rounds could
+  // override pairs the plugin already knows.
+  const shownPicks = () =>
+    Object.fromEntries(
+      Object.entries(matchRows).map(([locale, rows]) => [
+        locale,
+        Object.fromEntries(
+          rows
+            .filter((row) => alignments[locale]?.[row.sourceKey])
+            .map((row) => [
+              row.sourceKey,
+              alignments[locale][row.sourceKey] === NONE
+                ? null
+                : alignments[locale][row.sourceKey],
+            ]),
+        ),
+      ]),
+    );
+  // Same-type modules a language can't pair on its own are matched before
+  // anything is generated. The check runs again after confirming: modules
+  // nested in a list only become comparable once their parent is matched.
+  const proceed = async (only) => {
+    const targetLocales = only || sendTargets;
+    if (!targetLocales.length || (!modules.length && !initial)) return;
+    // Only pairs confirmed in the matching step are sent; earlier picks
+    // come back as pre-selections instead of being applied silently.
+    const confirmed = phase === "match" ? shownPicks() : {};
+    setBusy(true);
+    setError(null);
+    try {
+      const existing = targetLocales.filter(exists);
+      const { data } = existing.length
+        ? await post("/translate/changes/alignment", {
+            uid: model,
+            documentId,
+            sourceLocale,
+            targetLocales: existing,
+            revision: changes.revision,
+            moduleKeys: modules,
+            alignments: confirmed,
+          })
+        : { data: { locales: {} } };
+      if (!mounted.current) return;
+      const found = Object.entries(data?.locales || {}).filter(
+        ([, rows]) => rows.length,
+      );
+      if (found.length)
+        openMatch(found, withSuggestions(alignments, found), phase === "match");
+      else await start(confirmed, targetLocales);
+    } catch (err) {
+      if (mounted.current) setError(message(err));
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+  // A different parent module has different nested modules: drop the
+  // nested picks and rows; confirming fetches the new ones.
+  const choose = (locale, sourceKey, targetKey) => {
+    const nested = (key) => key.startsWith(`${sourceKey}/`);
+    setAlignments((current) => ({
+      ...current,
+      [locale]: {
+        ...Object.fromEntries(
+          Object.entries(current[locale] || {}).filter(([key]) => !nested(key)),
+        ),
+        [sourceKey]: targetKey,
+      },
+    }));
+    setMatchRows((current) => ({
+      ...current,
+      [locale]: (current[locale] || []).filter((row) => !nested(row.sourceKey)),
+    }));
+  };
+  // Rows without a pick, or sharing a pick with another row.
+  const matchProblems = (locale) => {
+    const chosen = alignments[locale] || {};
+    const rows = matchRows[locale] || [];
+    const uses = {};
+    for (const row of rows)
+      if (chosen[row.sourceKey] && chosen[row.sourceKey] !== NONE)
+        uses[chosen[row.sourceKey]] = (uses[chosen[row.sourceKey]] || 0) + 1;
+    return new Set(
+      rows
+        .filter(
+          (row) => !chosen[row.sourceKey] || uses[chosen[row.sourceKey]] > 1,
+        )
+        .map((row) => row.sourceKey),
+    );
+  };
+  const matchReady = Object.keys(matchRows).every(
+    (locale) => matchProblems(locale).size === 0,
+  );
   const toggle = (setter, key, checked) =>
     setter((current) =>
       checked ? [...current, key] : current.filter((item) => item !== key),
@@ -627,6 +870,17 @@ export function ChangesModal({
     setApplied({});
     setError(null);
     onRefresh?.();
+  };
+
+  // A preview can still stop on ambiguous modules (e.g. the translation
+  // changed meanwhile); those go through the same matching step.
+  const rematch = async () => {
+    const locales = (job?.targets || [])
+      .filter((item) => item.result?.details?.alignments?.length)
+      .map((item) => item.locale);
+    await backToPick();
+    // Fresh rows carry content filtered for this editor.
+    if (mounted.current && locales.length) await proceed(locales);
   };
 
   const allModulesSelected = modules.length === (changes?.modules || []).length;
@@ -1388,65 +1642,321 @@ export function ChangesModal({
   );
 
   const renderFailed = () => {
-    const rows = target?.result?.details?.alignments || [];
+    const needsMatch = !!target?.result?.details?.alignments?.length;
     return (
-      <Flex direction="column" alignItems="stretch" gap={3}>
-        <Notice
-          variant={rows.length ? "warning" : "danger"}
-          title={
-            rows.length
-              ? t("alignTitle", "Match the changed modules")
-              : t("failed", "This preview couldn't be generated")
-          }
+      <Notice
+        variant={needsMatch ? "warning" : "danger"}
+        title={
+          needsMatch
+            ? t("alignTitle", "Some modules need matching")
+            : t("failed", "This preview couldn't be generated")
+        }
+      >
+        <Typography
+          variant="pi"
+          textColor={needsMatch ? "warning700" : "danger700"}
         >
-          <Typography
-            variant="pi"
-            textColor={rows.length ? "warning700" : "danger700"}
+          {needsMatch
+            ? t(
+                "alignHelp",
+                "The {language} version can't tell some of its modules apart. Confirm which module is which, then the previews are generated again.",
+                { language: localeName(active) },
+              )
+            : target?.error || job?.error}
+        </Typography>
+        {needsMatch && (
+          <Box>
+            <Button variant="secondary" onClick={rematch} disabled={busy}>
+              {t("matchAction", "Match modules")}
+            </Button>
+          </Box>
+        )}
+      </Notice>
+    );
+  };
+
+  // "page.3" reads as "No. 4 in Page"; nested lists keep their parent path.
+  const place = (path) => {
+    const parts = String(path || "").split(".");
+    const last = parts.at(-1);
+    if (!/^\d+$/.test(last)) return humanizePath(path);
+    return t("place", "No. {position} in {list}", {
+      position: Number(last) + 1,
+      list: humanizePath(parts.slice(0, -1).join(".")),
+    });
+  };
+  const contentLabels = {
+    emptyLabel: t("noContent", "No text or images"),
+    moreLabel: (count) =>
+      t(
+        "moreFields",
+        "+ {count, plural, one {# more field} other {# more fields}}",
+        {
+          count,
+        },
+      ),
+    linksLabel: (links) =>
+      links.length > 3
+        ? t("linksMore", "{links} and {count} more", {
+            links: links.slice(0, 3).join(", "),
+            count: links.length - 3,
+          })
+        : links.join(", "),
+  };
+
+  const renderMatchRow = (locale, row, problems) => {
+    const chosen = alignments[locale]?.[row.sourceKey] || null;
+    const candidate = row.candidates.find((c) => c.key === chosen);
+    // Which other source module already uses each candidate.
+    const usedBy = {};
+    for (const other of matchRows[locale] || [])
+      if (other.sourceKey !== row.sourceKey) {
+        const key = alignments[locale]?.[other.sourceKey];
+        if (key && key !== NONE) usedBy[key] = other;
+      }
+    const clash = chosen && usedBy[chosen];
+    const problem = problems.has(row.sourceKey);
+    const language = localeName(locale);
+    return (
+      <Card key={row.sourceKey} shadow="tableShadow">
+        <Flex
+          paddingTop={3}
+          paddingBottom={3}
+          paddingLeft={4}
+          paddingRight={4}
+          background="neutral100"
+          justifyContent="space-between"
+          alignItems="center"
+          gap={3}
+          wrap="wrap"
+          style={{ borderRadius: "4px 4px 0 0" }}
+        >
+          <Box>
+            <Typography variant="omega" fontWeight="bold" tag="p">
+              {row.label}
+            </Typography>
+            <Typography variant="pi" textColor="neutral600">
+              {place(row.sourcePath)}
+            </Typography>
+          </Box>
+          <Flex gap={1}>
+            {row.changed && (
+              <Badge
+                size="S"
+                backgroundColor="primary100"
+                textColor="primary700"
+              >
+                {t("edited", "Edited")}
+              </Badge>
+            )}
+            {row.removed && (
+              <Badge
+                size="S"
+                backgroundColor="warning100"
+                textColor="warning700"
+              >
+                {t("removedIn", "Removed in {language}", {
+                  language: localeName(sourceLocale),
+                })}
+              </Badge>
+            )}
+          </Flex>
+        </Flex>
+        <Box padding={4}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns:
+                "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
+              gap: 12,
+            }}
           >
-            {rows.length
-              ? t(
-                  "alignHelp",
-                  "The {language} version has several modules that could correspond to the changed ones. Pick the matching module, then generate the preview again.",
-                  { language: localeName(active) },
-                )
-              : target?.error || job?.error}
+            <Box padding={3} hasRadius background="neutral100">
+              <Flex direction="column" alignItems="stretch" gap={3}>
+                <SectionLabel>{localeName(sourceLocale)}</SectionLabel>
+                <ModuleContent content={row.content} {...contentLabels} />
+              </Flex>
+            </Box>
+            <Box
+              padding={3}
+              hasRadius
+              background="neutral0"
+              borderColor={problem ? "danger600" : "neutral200"}
+              borderWidth="1px"
+              borderStyle="solid"
+            >
+              <Flex direction="column" alignItems="stretch" gap={3}>
+                <SectionLabel>{language}</SectionLabel>
+                <Box>
+                  <SingleSelect
+                    aria-label={t(
+                      "matchLabel",
+                      "{language} module for {module}",
+                      {
+                        language,
+                        module: `${row.label} ${place(row.sourcePath)}`,
+                      },
+                    )}
+                    placeholder={t(
+                      "matchPlaceholder",
+                      "Choose the matching module",
+                    )}
+                    value={chosen || ""}
+                    hasError={problem}
+                    disabled={busy || (!row.candidates.length && !row.removed)}
+                    onChange={(value) => choose(locale, row.sourceKey, value)}
+                  >
+                    {row.candidates.map((option) => (
+                      <SingleSelectOption key={option.key} value={option.key}>
+                        {[
+                          t("optionPosition", "No. {position}", {
+                            position: option.position,
+                          }),
+                          excerpt(option.content) || option.label,
+                          usedBy[option.key] &&
+                            t("usedFor", "used for No. {position}", {
+                              position: usedBy[option.key].position,
+                            }),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </SingleSelectOption>
+                    ))}
+                    {row.removed && (
+                      <SingleSelectOption value={NONE}>
+                        {t("matchNoneOption", "Not in the {language} version", {
+                          language,
+                        })}
+                      </SingleSelectOption>
+                    )}
+                  </SingleSelect>
+                  <Box paddingTop={1}>
+                    <Typography
+                      variant="pi"
+                      textColor={problem ? "danger600" : "neutral600"}
+                    >
+                      {chosen === NONE
+                        ? t(
+                            "matchNoneChosen",
+                            "Nothing is removed from the {language} version.",
+                            { language },
+                          )
+                        : !row.candidates.length
+                          ? t(
+                              "matchNone",
+                              "Every {language} module of this type is already matched to another one. Go back and leave this module out, or add it to the {language} version first.",
+                              { language },
+                            )
+                          : !chosen
+                            ? t(
+                                "matchMissing",
+                                "Pick the {language} module that translates this one.",
+                                {
+                                  language,
+                                },
+                              )
+                            : clash
+                              ? t(
+                                  "matchClash",
+                                  "Also picked for {module}. Each {language} module can only be matched once.",
+                                  {
+                                    module: `${clash.label} ${place(clash.sourcePath)}`,
+                                    language,
+                                  },
+                                )
+                              : row.removed
+                                ? t(
+                                    "matchRemoved",
+                                    "This {language} module is removed when you apply the translation.",
+                                    { language },
+                                  )
+                                : chosen === row.suggested
+                                  ? t(
+                                      "matchSuggested",
+                                      "Suggested from position and content.",
+                                    )
+                                  : null}
+                    </Typography>
+                  </Box>
+                </Box>
+                {candidate && (
+                  <ModuleContent
+                    content={candidate.content}
+                    {...contentLabels}
+                  />
+                )}
+              </Flex>
+            </Box>
+          </div>
+        </Box>
+      </Card>
+    );
+  };
+
+  const renderMatchLocale = (locale) => {
+    const rows = matchRows[locale] || [];
+    const problems = matchProblems(locale);
+    const language = localeName(locale);
+    return (
+      <Flex direction="column" alignItems="stretch" gap={4}>
+        <Notice
+          variant="info"
+          title={t("matchTitle", "Which {language} module is which?", {
+            language,
+          })}
+        >
+          <Typography variant="pi" textColor="neutral800">
+            {t(
+              "matchHelp",
+              "This page has several modules of the same type, and the plugin can't tell yet which {language} module translates which {source} module. Check the pairs below so the changes land in the right place.",
+              { language, source: localeName(sourceLocale) },
+            )}
+          </Typography>
+          <Typography variant="pi" textColor="neutral800">
+            {t(
+              "matchHelpSuggested",
+              "Each pair is pre-selected by position and content. Compare the texts and change any pair that doesn't fit. After you apply the translation, the plugin remembers these pairs.",
+            )}
           </Typography>
         </Notice>
-        {rows.map((row) => (
-          <Card key={row.sourceKey} padding={4}>
-            <Flex direction="column" alignItems="stretch" gap={2}>
-              <Box>
-                <Typography variant="omega" fontWeight="semiBold" tag="p">
-                  {row.label}
-                </Typography>
-                <Typography variant="pi" textColor="neutral600">
-                  {humanizePath(row.sourcePath)}
-                </Typography>
-              </Box>
-              <SingleSelect
-                aria-label={t("match", "Matching translated module")}
-                placeholder={t("match", "Matching translated module")}
-                value={alignments[active]?.[row.sourceKey] || ""}
-                onChange={(selected) =>
-                  setAlignments((current) => ({
-                    ...current,
-                    [active]: {
-                      ...current[active],
-                      [row.sourceKey]: selected,
-                    },
-                  }))
-                }
-              >
-                {row.candidates.map((candidate) => (
-                  <SingleSelectOption key={candidate.key} value={candidate.key}>
-                    {candidate.label} · {humanizePath(candidate.path)}
-                  </SingleSelectOption>
-                ))}
-              </SingleSelect>
-            </Flex>
-          </Card>
-        ))}
+        {rows.map((row) => renderMatchRow(locale, row, problems))}
       </Flex>
+    );
+  };
+
+  const renderMatch = () => {
+    const matchLocales = Object.keys(matchRows);
+    if (matchLocales.length < 2) return renderMatchLocale(matchLocales[0]);
+    return (
+      <Tabs.Root
+        variant="simple"
+        value={matchLocale || undefined}
+        onValueChange={setMatchLocale}
+      >
+        <Box paddingBottom={4}>
+          <Tabs.List aria-label={t("languagesTabs", "Languages")}>
+            {matchLocales.map((locale) => {
+              const open = matchProblems(locale).size > 0;
+              const Icon = open ? WarningCircle : CheckCircle;
+              return (
+                <Tabs.Trigger key={locale} value={locale}>
+                  <Flex gap={2} alignItems="center" tag="span">
+                    {localeName(locale)}
+                    <Box
+                      color={open ? "warning600" : "success600"}
+                      tag="span"
+                      aria-hidden
+                    >
+                      <Icon width="1.2rem" height="1.2rem" />
+                    </Box>
+                  </Flex>
+                </Tabs.Trigger>
+              );
+            })}
+          </Tabs.List>
+        </Box>
+        {matchLocale && renderMatchLocale(matchLocale)}
+      </Tabs.Root>
     );
   };
 
@@ -1495,18 +2005,22 @@ export function ChangesModal({
     </Tabs.Root>
   );
 
-  const hasAlignments = Object.keys(alignments[active] || {}).length > 0;
-
   return (
     <Modal.Root open={open} onOpenChange={(isOpen) => !isOpen && close()}>
       <Modal.Content style={{ maxWidth: 880, width: "calc(100vw - 32px)" }}>
         <Modal.Header>
           <Modal.Title>
-            {phase === "review" && (job?.targets || []).length === 1
-              ? t("titleOne", "Review {language} translation", {
-                  language: localeName(active),
-                })
-              : t("title", "Translate saved changes")}
+            {phase === "match"
+              ? Object.keys(matchRows).length === 1
+                ? t("titleMatch", "Match modules for {language}", {
+                    language: localeName(Object.keys(matchRows)[0]),
+                  })
+                : t("titleMatchMany", "Match modules")
+              : phase === "review" && (job?.targets || []).length === 1
+                ? t("titleOne", "Review {language} translation", {
+                    language: localeName(active),
+                  })
+                : t("title", "Translate saved changes")}
           </Modal.Title>
         </Modal.Header>
         <Modal.Body>
@@ -1522,6 +2036,7 @@ export function ChangesModal({
               </Alert>
             )}
             {phase === "pick" && renderPick()}
+            {phase === "match" && renderMatch()}
             {phase === "running" && renderRunning()}
             {phase === "review" && renderReview()}
           </Flex>
@@ -1530,7 +2045,7 @@ export function ChangesModal({
           <Button variant="tertiary" onClick={close} disabled={busy}>
             {phase === "pick"
               ? t("later", "Not now")
-              : phase === "running"
+              : phase === "running" || phase === "match"
                 ? t("cancel", "Cancel")
                 : allApplied
                   ? t("done", "Done")
@@ -1538,12 +2053,33 @@ export function ChangesModal({
           </Button>
           {phase === "pick" && (
             <Button
-              onClick={start}
+              onClick={() => proceed()}
               loading={busy}
               disabled={!sendTargets.length || (!modules.length && !initial)}
             >
               {t("generate", "Preview translations")}
             </Button>
+          )}
+          {phase === "match" && (
+            <Flex gap={2} wrap="wrap" justifyContent="flex-end">
+              <Button
+                variant="tertiary"
+                onClick={() => {
+                  setPhase("pick");
+                  setError(null);
+                }}
+                disabled={busy}
+              >
+                {t("change", "Back")}
+              </Button>
+              <Button
+                onClick={() => proceed()}
+                loading={busy}
+                disabled={!matchReady}
+              >
+                {t("matchConfirm", "Confirm and preview")}
+              </Button>
+            </Flex>
           )}
           {phase === "review" && (
             <Flex gap={2} wrap="wrap" justifyContent="flex-end">
@@ -1561,11 +2097,6 @@ export function ChangesModal({
                   {t("apply", "Apply to {language}", {
                     language: localeName(active),
                   })}
-                </Button>
-              )}
-              {!preview && !applied[active] && hasAlignments && (
-                <Button onClick={start} loading={busy}>
-                  {t("regenerate", "Generate again")}
                 </Button>
               )}
             </Flex>

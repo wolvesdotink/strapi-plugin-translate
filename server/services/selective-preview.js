@@ -3,6 +3,7 @@ import {
   snapshot,
   fingerprint,
   problem,
+  isPrivate,
   clone,
   get,
   set,
@@ -37,6 +38,11 @@ export default ({ strapi }) => {
     expiresAt: row.expiresAt,
     initialTranslation: row.prepared.initialTranslation,
   });
+  // Text outside the selected changes only labels modules when it is not
+  // private and this editor may read it.
+  const labelText = (prepared, authorize) => (tree, field, side) =>
+    !isPrivate(strapi, tree, field) &&
+    (!authorize?.readable || authorize.readable(prepared, field.path, side));
   const fullPrepared = async (args) => {
     const source = await service("changes").load(
       args.uid,
@@ -67,6 +73,8 @@ export default ({ strapi }) => {
     const prepared = args.forceInitial
       ? await fullPrepared(args)
       : await service("changes").prepare(args);
+    // Authorize first: even an ambiguity error describes the target.
+    if (authorize) await authorize(prepared);
     if (prepared.unresolved.length)
       throw Object.assign(
         problem("Match the affected modules before generating a preview."),
@@ -74,7 +82,6 @@ export default ({ strapi }) => {
       );
     if (!prepared.ops.length && !prepared.initialTranslation)
       throw problem(`No pending changes for ${args.targetLocale}.`, 400);
-    if (authorize) await authorize(prepared);
     let relations = await service("relations").resolve(prepared, null, {
       before: true,
     });
@@ -120,7 +127,9 @@ export default ({ strapi }) => {
     });
     const proposed = mergePatch(strapi, prepared, computed.proposed);
     relations = await service("relations").resolve(prepared, proposed);
-    const modules = previewModules(prepared, proposed, prepared.ops);
+    const modules = previewModules(prepared, proposed, prepared.ops, {
+      textAllowed: labelText(prepared, authorize),
+    });
     const labels = (v, locale) =>
       (Array.isArray(v) ? v : v ? [v] : []).map(
         (item) =>
@@ -463,6 +472,19 @@ export default ({ strapi }) => {
                   message: repair.message,
                 });
               }
+              // Order labels quote translated text; show the repaired one.
+              const fresh = previewModules(
+                repairRow.prepared,
+                mergePatch(strapi, repairRow.prepared, repairRow.computed),
+                repairRow.prepared.ops,
+                { textAllowed: labelText(repairRow.prepared, authorize) },
+              ).flatMap((module) => module.fields);
+              for (const module of repairRow.modules)
+                for (const field of module.fields)
+                  if (field.kind === "structure")
+                    field.after =
+                      fresh.find((f) => f.id === field.id)?.after ??
+                      field.after;
               await service("state").write(key(id), row, TTL);
               return publicPreview(row);
             },

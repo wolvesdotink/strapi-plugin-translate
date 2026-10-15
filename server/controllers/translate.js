@@ -36,7 +36,8 @@ const permissionField = (strapi, uid, path) => {
   return parts.join(".");
 };
 
-const authorizeChanges = (strapi, ctx) => async (prepared) => {
+const authorizeChanges = (strapi, ctx) => {
+  const authorize = async (prepared) => {
   const checker = strapi
     .plugin("content-manager")
     .service("permission-checker")
@@ -111,6 +112,47 @@ const authorizeChanges = (strapi, ctx) => async (prepared) => {
       }
     }
   }
+  };
+  // Whether this editor may read one field of the source or target entry;
+  // previews use it before showing text outside the selected changes.
+  authorize.readable = (prepared, path, side = "source") => {
+    const entry = side === "target" ? prepared.target : prepared.source;
+    if (!entry) return false;
+    const checker = strapi
+      .plugin("content-manager")
+      .service("permission-checker")
+      .create({ userAbility: ctx.state.userAbility, model: prepared.uid });
+    return !checker.cannot.read(entry, permissionField(strapi, prepared.uid, path));
+  };
+  return authorize;
+};
+
+// Populated linked items are sanitized with their own content type's
+// permissions; unreadable ones are dropped.
+const sanitizeLinks = async (strapi, ctx, uid, entry, depth = 0) => {
+  const schema = strapi.getModel(uid);
+  if (!schema || !entry || depth > 6) return entry;
+  for (const [name, attr] of Object.entries(schema.attributes || {})) {
+    const value = entry[name];
+    if (value == null) continue;
+    const many = Array.isArray(value);
+    const items = many ? value : [value];
+    if (attr.type === "relation") {
+      const checker = strapi
+        .plugin("content-manager")
+        .service("permission-checker")
+        .create({ userAbility: ctx.state.userAbility, model: attr.target });
+      const readable = [];
+      for (const item of items)
+        if (item && typeof item === "object" && !checker.cannot.read(item))
+          readable.push(await checker.sanitizeOutput(item));
+      entry[name] = many ? readable : readable[0] || null;
+    } else if (attr.type === "component")
+      for (const item of items) await sanitizeLinks(strapi, ctx, attr.component, item, depth + 1);
+    else if (attr.type === "dynamiczone")
+      for (const item of items) await sanitizeLinks(strapi, ctx, item.__component, item, depth + 1);
+  }
+  return entry;
 };
 
 const emptyFormatProgress = () => ({
@@ -733,6 +775,41 @@ export default ({ strapi }) => {
         // Status is only shown for languages this editor may translate into.
         const languages = out.languages?.filter((l) => targetLocales.includes(l.locale));
         ctx.body = { ...out, ...(languages ? { languages } : {}), targetLocales };
+      } catch (err) { fail(ctx, err); }
+    },
+
+    /**
+     * POST /translate/changes/alignment — modules each existing language
+     * can't match on its own, with content and a suggested pair per module.
+     * Called before generating previews so editors confirm pairs up front.
+     */
+    async getAlignment(ctx) {
+      const body = ctx.request.body || {};
+      const sourceLocale = body.sourceLocale || strapi.plugin("translate").config.sourceLocale;
+      const supported = await localesSvc().codes();
+      const targets = Array.isArray(body.targetLocales) ? [...new Set(body.targetLocales)] : [];
+      if (!body.uid || !body.documentId || !supported.has(sourceLocale) || !targets.length || targets.some(l => !supported.has(l) || l === sourceLocale)) return ctx.badRequest("Choose supported target languages different from the source.");
+      if (body.moduleKeys && (!Array.isArray(body.moduleKeys) || body.moduleKeys.some(k => typeof k !== "string"))) return ctx.badRequest("Invalid module selection");
+      try {
+        const changes = strapi.plugin("translate").service("changes");
+        const authorize = authorizeChanges(strapi, ctx);
+        const locales = {};
+        for (const targetLocale of targets) {
+          // Languages without this entry are created whole; nothing to match.
+          const prepared = await changes.prepare({ uid: body.uid, documentId: body.documentId, sourceLocale, targetLocale,
+            revision: body.revision, moduleKeys: body.moduleKeys, alignments: body.alignments?.[targetLocale] || {}, initialTranslation: true });
+          if (!prepared.target || !prepared.unresolved.length) continue;
+          await authorize(prepared);
+          // Summaries only show what this editor may read.
+          const checker = strapi.plugin("content-manager").service("permission-checker").create({ userAbility: ctx.state.userAbility, model: body.uid });
+          locales[targetLocale] = changes.describe(prepared, {
+            source: await sanitizeLinks(strapi, ctx, body.uid, await checker.sanitizeOutput(prepared.source)),
+            target: await sanitizeLinks(strapi, ctx, body.uid, await checker.sanitizeOutput(prepared.target)),
+            canRead: (uid) => ctx.state.userAbility.can(READ_ACTION, uid),
+            allowField: (f) => checker.can.read(prepared.source, permissionField(strapi, body.uid, f.path)),
+          });
+        }
+        ctx.body = { locales };
       } catch (err) { fail(ctx, err); }
     },
 

@@ -5,6 +5,10 @@ import {
   align,
   clone,
   problem,
+  get,
+  summarize,
+  summarizeSnapshot,
+  hiddenNode,
 } from "./content-tree";
 
 export default ({ strapi }) => {
@@ -360,11 +364,28 @@ export default ({ strapi }) => {
       const nodeKeys = new Set(
         ops.flatMap((op) => [op.nodeKey, ...(op.beforeItems || [])]),
       );
-      const unresolved = alignment.unresolved.filter((row) =>
-        [...nodeKeys].some(
-          (k) => k === row.sourceKey || k.startsWith(`${row.sourceKey}/`),
-        ),
-      );
+      const within = (key, row) =>
+        key === row.sourceKey || key.startsWith(`${row.sourceKey}/`);
+      const unresolved = alignment.unresolved
+        .filter((row) => [...nodeKeys].some((k) => within(k, row)))
+        .map((row) => {
+          const node = current.nodes[row.sourceKey];
+          // Positions refer to the page as the editor sees it now.
+          const sourcePath = node ? node.path.join(".") : row.sourcePath;
+          return {
+            ...row,
+            sourcePath,
+            position: node
+              ? Number(node.path.at(-1)) + 1 || row.position
+              : row.position,
+            changed: ops.some(
+              (op) => op.kind === "field" && within(op.nodeKey, row),
+            ),
+            removed: !node,
+          };
+        })
+        // Removing a module the translation no longer has needs no pairing.
+        .filter((row) => !(row.removed && !row.candidates.length));
       return {
         uid,
         documentId,
@@ -381,6 +402,44 @@ export default ({ strapi }) => {
         sourceRevision: record.revision,
         initialTranslation: !target,
       };
+    },
+    // Editors match modules by what they say: each row gets the source
+    // module's current content and every candidate's translation. Callers
+    // pass entries already sanitized for the requesting user.
+    describe(prepared, { source, target, canRead, allowField }) {
+      const empty = { texts: [], media: [], links: [] };
+      return prepared.unresolved.map((row) => {
+        const node = prepared.current.nodes[row.sourceKey];
+        return {
+          ...row,
+          content: node
+            ? hiddenNode(strapi, prepared.current, row.sourceKey)
+              ? empty
+              : summarize(strapi, node.uid, get(source, node.path), {
+                  canRead,
+                })
+            : summarizeSnapshot(
+                strapi,
+                prepared.before,
+                row.sourceKey,
+                allowField,
+              ),
+          candidates: row.candidates.map((candidate) => {
+            const targetNode = prepared.targetTree.nodes[candidate.key];
+            return {
+              ...candidate,
+              content: hiddenNode(strapi, prepared.targetTree, candidate.key)
+                ? empty
+                : summarize(
+                    strapi,
+                    targetNode.uid,
+                    get(target, targetNode.path),
+                    { canRead },
+                  ),
+            };
+          }),
+        };
+      });
     },
     async applied(prepared, acceptedOps, savedTarget) {
       const key = baselineKey(

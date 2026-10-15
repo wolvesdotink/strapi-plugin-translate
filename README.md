@@ -266,7 +266,11 @@ Omit `contentTypes` to track all localized content types. Set `enabled: false` o
 
 Only fields allowed by the schema's translation directives and localization settings participate. Cleared text and structural changes do not require AI calls. A changed rich-text or blocks field is translated as a coherent field, retaining its formatting. The estimate counts selected fields and any explicitly selected linked-item work.
 
-For component arrays and dynamic zones, applying a patch may submit the complete merged array that Strapi requires. Its untouched children come from the current **target** draft, with their target IDs and manual edits. They are not retranslated. Existing module correspondence uses a persisted mapping, an optional application-defined `translationKey`, or an unambiguous single component type. Duplicate types that cannot be matched require an explicit module selection in the review UI; array position alone is not treated as identity.
+For component arrays and dynamic zones, applying a patch may submit the complete merged array that Strapi requires. Its untouched children come from the current **target** draft, with their target IDs and manual edits. They are not retranslated. Existing module correspondence uses a persisted mapping, an optional application-defined `translationKey`, or an unambiguous single component type. Duplicate types that cannot be matched are confirmed by the editor before any preview is generated; array position alone is not treated as identity.
+
+### Matching duplicate modules
+
+When a language has several modules of the same type and no stored mapping, **Preview translations** first opens a matching step. Each source module is shown next to its target candidates with their texts, image thumbnails and linked items. Pairs are pre-selected by values that stay identical across languages (media, links, numbers) and then by page order, so editors usually only confirm them. A target module can only be picked once. A module removed from the source can be marked **Not in the {language} version** when the translation never had it. Once the translation is applied, the confirmed pairs become the stored mapping and are not asked again. Module digests only include fields the editor may read; private attributes and unreadable linked items are left out.
 
 ### Linked collection items
 
@@ -293,6 +297,12 @@ POST /translate/changes
   { uid, documentId, sourceLocale, targetLocale? }
   -> { revision, modules, targetLocales, shouldPrompt }
 
+POST /translate/changes/alignment
+  { uid, documentId, sourceLocale, revision, targetLocales, moduleKeys?,
+    alignments? }
+  -> { locales: { [locale]: [{ sourceKey, label, sourcePath, position,
+       changed, removed, suggested, content, candidates }] } }
+
 POST /translate/preview
   { mode: "changes", uid, documentId, sourceLocale, revision,
     targetLocales, moduleKeys?, alignments?,
@@ -310,7 +320,7 @@ POST /translate/preview/:id/accept
 
 `childAllowMissingRelations` maps child preview IDs to explicit boolean omission approvals. Required links cannot be omitted.
 
-`POST /translate/estimate` also accepts `mode: "changes"` and the same source/module/language selection. `alignments` is a map per target locale of source module keys to target module keys. The server validates selections against persisted snapshots. Scoped preview IDs begin with `change_`; the legacy single-language preview API remains supported.
+`POST /translate/estimate` also accepts `mode: "changes"` and the same source/module/language selection. `alignments` is a map per target locale of source module keys to target module keys; `null` confirms that a removed source module has no counterpart in that language. The server validates selections against persisted snapshots. Scoped preview IDs begin with `change_`; the legacy single-language preview API remains supported.
 
 ## Before and after
 
@@ -318,6 +328,8 @@ These screenshots show the current plugin in the Strapi 5.57 admin using a dispo
 
 ![Editor before saving source changes](docs/screenshots/before-editor.png)
 ![After: choose modules and languages following a source save](docs/screenshots/after-save-prompt.png)
+![After: confirm which English module belongs to each German module, with their content side by side](docs/screenshots/after-module-matching.png)
+![Matching a removed module and blocking a target module picked twice](docs/screenshots/after-module-matching-removed.png)
 ![After: preview one module and its English collection link](docs/screenshots/after-module-preview.png)
 ![After: English content with untouched manual copy](docs/screenshots/after-english-content.png)
 ![After: a French link that has no localized item yet must be resolved or explicitly omitted](docs/screenshots/after-missing-link.png)
@@ -332,6 +344,7 @@ These screenshots show the current plugin in the Strapi 5.57 admin using a dispo
 
 ![Mobile: choose modules and languages](docs/screenshots/after-save-prompt-mobile.png)
 ![Mobile: review a module translation](docs/screenshots/after-module-preview-mobile.png)
+![Mobile: match duplicate modules](docs/screenshots/after-module-matching-mobile.png)
 
 </details>
 
