@@ -6,6 +6,9 @@ import {
   align,
   clone,
   fingerprint,
+  summarize,
+  summarizeSnapshot,
+  hiddenNode,
 } from "../../server/services/content-tree.js";
 import {
   mergePatch,
@@ -301,6 +304,177 @@ describe("selective content identity and patching", () => {
       align(snapshot(strapi, "page", a), snapshot(strapi, "page", b))
         .unresolved,
     ).toEqual([]);
+  });
+  it("suggests duplicate-type pairs by page order", () => {
+    const a = clone(source),
+      b = clone(target);
+    a.modules.push({ id: 3, __component: "hero", title: "Zwei" });
+    b.modules.push({ id: 21, __component: "hero", title: "Two" });
+    const rows = align(
+      snapshot(strapi, "page", a),
+      snapshot(strapi, "page", b),
+    ).unresolved;
+    expect(rows.map((row) => [row.sourceKey, row.suggested])).toEqual([
+      ["root/modules:hero:1", "root/modules:hero:20"],
+      ["root/modules:hero:3", "root/modules:hero:21"],
+    ]);
+    expect(rows[1]).toMatchObject({ position: 3 });
+    expect(rows[1].candidates.map((c) => c.position)).toEqual([1, 3]);
+  });
+  it("prefers values shared across languages over page order", () => {
+    const a = clone(source),
+      b = clone(target);
+    a.modules.push({
+      id: 3,
+      __component: "articles",
+      title: "Mehr",
+      items: [{ documentId: "b" }],
+    });
+    // The translation lists the same two modules in reverse order.
+    b.modules = [
+      b.modules[0],
+      {
+        id: 31,
+        __component: "articles",
+        title: "More",
+        items: [{ documentId: "b" }],
+      },
+      b.modules[1],
+    ];
+    const rows = align(
+      snapshot(strapi, "page", a),
+      snapshot(strapi, "page", b),
+    ).unresolved;
+    expect(
+      Object.fromEntries(rows.map((r) => [r.sourceKey, r.suggested])),
+    ).toEqual({
+      "root/modules:articles:2": "root/modules:articles:30",
+      "root/modules:articles:3": "root/modules:articles:31",
+    });
+  });
+  it("does not offer targets already paired by translationKey", () => {
+    const a = clone(source),
+      b = clone(target);
+    a.modules[0].translationKey = "hero-one";
+    b.modules[0].translationKey = "hero-one";
+    a.modules.push({ id: 3, __component: "hero", title: "Zwei" });
+    a.modules.push({ id: 4, __component: "hero", title: "Drei" });
+    b.modules.push({ id: 21, __component: "hero", title: "Two" });
+    b.modules.push({ id: 22, __component: "hero", title: "Three" });
+    const rows = align(
+      snapshot(strapi, "page", a),
+      snapshot(strapi, "page", b),
+    ).unresolved;
+    for (const row of rows)
+      expect(row.candidates.map((c) => c.key)).not.toContain(
+        "root/modules:hero:20",
+      );
+  });
+  it("leaves private fields and unreadable links out of summaries", () => {
+    models.articles.attributes.notes = { type: "string", private: true };
+    try {
+      expect(
+        summarize(
+          strapi,
+          "articles",
+          { title: "Artikel", notes: "intern", items: [{ title: "Geheim" }] },
+          { canRead: () => false },
+        ),
+      ).toEqual({
+        texts: [{ name: ["title"], text: "Artikel" }],
+        media: [],
+        links: [],
+      });
+    } finally {
+      delete models.articles.attributes.notes;
+    }
+  });
+  it("keeps private text out of snapshot summaries and order labels", () => {
+    models.hero.attributes.description = { ...text, private: true };
+    try {
+      const a = clone(source),
+        b = clone(source);
+      b.modules.reverse();
+      const tree = snapshot(strapi, "page", a);
+      expect(
+        summarizeSnapshot(strapi, tree, "root/modules:hero:1").texts,
+      ).toEqual([{ name: ["title"], text: "Hallo" }]);
+      const prepared = prepare(a, b);
+      mergePatch(strapi, prepared, b);
+      const order = (options) =>
+        previewModules(prepared, b, prepared.ops, options)
+          .flatMap((m) => m.fields)
+          .find((f) => f.kind === "structure").source;
+      // Without a permission check only module names are shown.
+      expect(order()).toEqual(["Articles", "Hero"]);
+      expect(order({ textAllowed: () => true })).toEqual([
+        "Articles · Artikel",
+        "Hero · Hallo",
+      ]);
+    } finally {
+      models.hero.attributes.description = text;
+    }
+  });
+  it("treats configured and inherited private attributes as private", () => {
+    models.hero.options = { privateAttributes: ["description"] };
+    models.page.attributes.modules.private = true;
+    try {
+      const tree = snapshot(strapi, "page", source);
+      expect(hiddenNode(strapi, tree, "root/modules:hero:1")).toBe(true);
+      delete models.page.attributes.modules.private;
+      expect(hiddenNode(strapi, tree, "root/modules:hero:1")).toBe(false);
+      expect(
+        summarizeSnapshot(strapi, tree, "root/modules:hero:1").texts,
+      ).toEqual([{ name: ["title"], text: "Hallo" }]);
+    } finally {
+      delete models.hero.options;
+      delete models.page.attributes.modules.private;
+    }
+  });
+  it("hides retained target text in order labels the editor cannot read", () => {
+    const a = clone(source),
+      b = clone(source);
+    b.modules.reverse();
+    const prepared = prepare(a, b);
+    const proposed = mergePatch(strapi, prepared, b);
+    const after = (textAllowed) =>
+      previewModules(prepared, proposed, prepared.ops, { textAllowed })
+        .flatMap((m) => m.fields)
+        .find((f) => f.kind === "structure").after;
+    expect(after(() => true)).toEqual(["Articles · Articles", "Hero · Hello"]);
+    expect(after((tree, f, side) => side === "source")).toEqual([
+      "Articles",
+      "Hero",
+    ]);
+  });
+  it("accepts an explicit no-match for a module", () => {
+    const a = clone(source),
+      b = clone(target);
+    a.modules.push({ id: 3, __component: "hero", title: "Zwei" });
+    b.modules.push({ id: 21, __component: "hero", title: "Two" });
+    const result = align(
+      snapshot(strapi, "page", a),
+      snapshot(strapi, "page", b),
+      {},
+      {
+        "root/modules:hero:3": null,
+        "root/modules:hero:1": "root/modules:hero:20",
+      },
+    );
+    expect(result.unresolved).toEqual([]);
+    expect(result.mapping["root/modules:hero:3"]).toBeUndefined();
+  });
+  it("summarizes module content for editors", () => {
+    expect(
+      summarize(strapi, "articles", {
+        title: "<p>Unsere **Artikel**</p>",
+        items: [{ documentId: "a", title: "Wandern" }],
+      }),
+    ).toEqual({
+      texts: [{ name: ["title"], text: "Unsere Artikel" }],
+      media: [],
+      links: ["Wandern"],
+    });
   });
   it("does not advance an excluded text change when accepting a module reorder", async () => {
     const edited = {

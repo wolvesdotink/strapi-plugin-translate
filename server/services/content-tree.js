@@ -182,9 +182,15 @@ export function align(source, target, previous = {}, explicit = {}) {
       const parentTarget = mapping[sourceNodeKey];
       const tc = target.containers[`${parentTarget}/${c.name}`];
       if (!tc) continue;
+      const rows = [];
       for (const key of c.items) {
         const node = source.nodes[key];
         if (!target.nodes[mapping[key]]) delete mapping[key];
+        // An editor can confirm a removed module no longer exists there.
+        if (key in explicit && explicit[key] == null) {
+          delete mapping[key];
+          continue;
+        }
         if (explicit[key]) {
           if (
             !tc.items.includes(explicit[key]) ||
@@ -211,25 +217,69 @@ export function align(source, target, previous = {}, explicit = {}) {
           )
             mapping[key] = stable || candidates[0];
           else if (candidates.length)
-            unresolved.push({
+            rows.push({
               sourceKey: key,
               label: node.label,
               sourcePath: node.path.join("."),
+              position: c.items.indexOf(key) + 1,
               candidates: candidates.map((k) => ({
                 key: k,
                 path: target.nodes[k].path.join("."),
                 label: target.nodes[k].label,
+                position: tc.items.indexOf(k) + 1,
               })),
             });
         }
         if (mapping[key]) walk(key);
       }
+      suggest(rows, c, tc);
+      unresolved.push(...rows);
+    }
+  };
+  // Pre-select the likeliest pair for each ambiguous module so the editor
+  // confirms instead of searching: values that stay identical across
+  // languages (media, links, numbers) first, then the order on the page.
+  const suggest = (rows, c, tc) => {
+    const mapped = new Set(Object.values(mapping));
+    const taken = new Set(mapped);
+    const open = (items, tree, isOpen) => (k) =>
+      items.filter((i) => tree.nodes[i].uid === tree.nodes[k].uid && isOpen(i));
+    const sourceOpen = open(c.items, source, (k) => !mapping[k]);
+    const targetOpen = open(tc.items, target, (k) => !mapped.has(k));
+    const shared = (sourceKey, targetKey) =>
+      Object.values(source.fields).filter((f) => {
+        if (
+          f.nodeKey !== sourceKey ||
+          f.value == null ||
+          f.value === "" ||
+          (Array.isArray(f.value) && !f.value.length)
+        )
+          return false;
+        const other = target.fields[`${targetKey}/${f.name}`];
+        return other && fingerprint(other.value) === fingerprint(f.value);
+      }).length;
+    for (const row of rows) {
+      const order = sourceOpen(row.sourceKey).indexOf(row.sourceKey);
+      let best = null;
+      for (const candidate of row.candidates) {
+        if (taken.has(candidate.key)) continue;
+        const distance = Math.abs(
+          targetOpen(candidate.key).indexOf(candidate.key) - order,
+        );
+        const score = shared(row.sourceKey, candidate.key) * 100 - distance;
+        if (!best || score > best.score) best = { key: candidate.key, score };
+      }
+      row.suggested = best?.key || null;
+      if (best) taken.add(best.key);
     }
   };
   walk("root");
   const used = Object.values(mapping);
   if (new Set(used).size !== used.length)
     throw problem("Two source modules cannot use the same target module.", 400);
+  // Targets already paired automatically can't be picked a second time.
+  for (const row of unresolved)
+    row.candidates = row.candidates.filter((c) => !used.includes(c.key));
   return { mapping, unresolved };
 }
 
@@ -291,4 +341,126 @@ function writeTree(strapi, uid, entry, options) {
     else out[name] = clone(v);
   }
   return out;
+}
+
+const TEXT_TYPES = ["string", "text", "richtext", "email"];
+const plain = (value, max = 220) => {
+  const text = String(value)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[#*_>`~|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+};
+const blockText = (node) =>
+  Array.isArray(node)
+    ? node.map(blockText).join(" ")
+    : node && typeof node === "object"
+      ? [node.text, blockText(node.children)].filter(Boolean).join(" ")
+      : "";
+
+// Strapi treats an attribute as private when its schema says so, or when the
+// model or the API response config lists it.
+export const privateAttribute = (strapi, uid, name) => {
+  const model = strapi.getModel(uid);
+  return !!(
+    model?.attributes?.[name]?.private ||
+    model?.options?.privateAttributes?.includes(name) ||
+    strapi.config?.get?.("api.responses.privateAttributes", [])?.includes(name)
+  );
+};
+
+// A readable digest of one module so editors can recognise it: its texts,
+// images and linked items. Not used for matching or writing. Pass a
+// permission-sanitized entry; `canRead` decides which linked types to name.
+export function summarize(strapi, uid, value, { canRead = () => true } = {}) {
+  const texts = [],
+    media = [],
+    links = [];
+  const walk = (model, entry, prefix, depth) => {
+    const schema = strapi.getModel(model);
+    if (!schema || !entry || depth > 3) return;
+    for (const [name, attr] of Object.entries(schema.attributes || {})) {
+      const v = entry[name];
+      if (
+        v == null ||
+        attr.writable === false ||
+        privateAttribute(strapi, model, name)
+      )
+        continue;
+      const label = prefix.concat(name);
+      if (TEXT_TYPES.includes(attr.type) || attr.type === "blocks") {
+        const text = plain(attr.type === "blocks" ? blockText(v) : v);
+        if (text) texts.push({ name: label, text });
+      } else if (attr.type === "media")
+        for (const file of Array.isArray(v) ? v : [v])
+          media.push({
+            name: file.alternativeText || file.name || null,
+            url: file.mime?.startsWith("image/")
+              ? file.formats?.thumbnail?.url || file.url
+              : null,
+          });
+      else if (attr.type === "relation" && canRead(attr.target)) {
+        const related = strapi.getModel(attr.target)?.attributes || {};
+        const field = ["title", "name", "label"].find(
+          (key) => related[key] && !privateAttribute(strapi, attr.target, key),
+        );
+        for (const item of Array.isArray(v) ? v : [v])
+          if (field && item?.[field]) links.push(plain(item[field], 80));
+      } else if (attr.type === "component")
+        for (const item of Array.isArray(v) ? v : [v])
+          walk(attr.component, item, label, depth + 1);
+      else if (attr.type === "dynamiczone")
+        for (const item of v) walk(item.__component, item, label, depth + 1);
+    }
+  };
+  walk(uid, value, [], 0);
+  return { texts, media, links: links.filter(Boolean) };
+}
+
+// A module nested anywhere inside a private component or dynamic zone.
+export function hiddenNode(strapi, tree, nodeKey) {
+  for (let key = nodeKey; key && key !== "root"; ) {
+    const container = Object.values(tree.containers).find((c) =>
+      c.items.includes(key),
+    );
+    if (!container) break;
+    if (
+      privateAttribute(
+        strapi,
+        tree.nodes[container.nodeKey]?.uid,
+        container.name,
+      )
+    )
+      return true;
+    key = container.nodeKey;
+  }
+  return false;
+}
+
+// Private attributes never leave the server, including anything nested in a
+// private component or dynamic zone.
+export const isPrivate = (strapi, tree, field) =>
+  privateAttribute(strapi, tree.nodes[field.nodeKey]?.uid, field.name) ||
+  hiddenNode(strapi, tree, field.nodeKey);
+
+// Texts of a module that only exists in an older snapshot, e.g. one removed
+// from the source since the last translation. `allow` checks field access.
+export function summarizeSnapshot(strapi, tree, key, allow = () => true) {
+  const texts = Object.values(tree.fields)
+    .filter(
+      (f) =>
+        (f.nodeKey === key || f.nodeKey.startsWith(`${key}/`)) &&
+        !isPrivate(strapi, tree, f) &&
+        allow(f) &&
+        (TEXT_TYPES.includes(f.type) || f.type === "blocks") &&
+        f.value != null,
+    )
+    .map((f) => ({
+      name: [f.name],
+      text: plain(f.type === "blocks" ? blockText(f.value) : f.value),
+    }))
+    .filter((f) => f.text);
+  return { texts, media: [], links: [] };
 }

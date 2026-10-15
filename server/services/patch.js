@@ -32,6 +32,7 @@ export function mergePatch(strapi, prepared, computed, ops = prepared.ops) {
   }
   const data = writable(strapi, prepared.uid, prepared.target);
   const appliedPaths = {};
+  const structureItems = {};
   for (const [key, targetKey] of Object.entries(prepared.mapping)) {
     if (prepared.targetTree.nodes[targetKey])
       appliedPaths[key] = prepared.targetTree.nodes[targetKey].path;
@@ -92,7 +93,8 @@ export function mergePatch(strapi, prepared, computed, ops = prepared.ops) {
     // Keep independently added target modules in their existing slots. Replace
     // only the mapped source sequence; append remaining new source modules.
     const result = [],
-      identities = [];
+      identities = [],
+      kept = [];
     let cursor = 0;
     for (let i = 0; i < original.length; i++) {
       if (beforeTargets.includes(targetItems[i])) {
@@ -103,6 +105,7 @@ export function mergePatch(strapi, prepared, computed, ops = prepared.ops) {
       } else {
         result.push(original[i]);
         identities.push(null);
+        kept[result.length - 1] = targetItems[i];
       }
     }
     while (cursor < desired.length) {
@@ -110,6 +113,10 @@ export function mergePatch(strapi, prepared, computed, ops = prepared.ops) {
       identities.push(desired[cursor++].sourceKey);
     }
     set(data, targetPath, op.many ? result : result[0] || null);
+    // The resulting order, including target-only modules kept in place.
+    structureItems[op.id] = identities.map((key, index) =>
+      key ? { source: key } : { target: kept[index] },
+    );
     identities.forEach((key, index) => {
       if (!key) return;
       const sourcePath = prepared.current.nodes[key].path;
@@ -133,6 +140,7 @@ export function mergePatch(strapi, prepared, computed, ops = prepared.ops) {
     }
   }
   prepared.appliedPaths = appliedPaths;
+  prepared.structureItems = structureItems;
   // Omit untouched top-level fields from the update. A changed dynamic-zone
   // array still contains its current untouched TARGET children and IDs.
   const roots = new Set(
@@ -141,7 +149,77 @@ export function mergePatch(strapi, prepared, computed, ops = prepared.ops) {
   return Object.fromEntries([...roots].map((root) => [root, data[root]]));
 }
 
-export function previewModules(prepared, proposed, ops) {
+// "Hero · Welcome to the mountains": same-type modules in an order change are
+// only distinguishable by what they say. Only text `allowed` may show.
+const firstText = (tree, key, allowed) =>
+  Object.values(tree?.fields || {}).find(
+    (f) =>
+      f.nodeKey === key &&
+      ["string", "text"].includes(f.type) &&
+      typeof f.value === "string" &&
+      f.value.trim() &&
+      allowed(tree, f),
+  );
+const itemLabel = (label, text) => {
+  const short =
+    typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
+  if (!short) return label;
+  return `${label} · ${short.length > 60 ? `${short.slice(0, 59)}…` : short}`;
+};
+
+export function previewModules(
+  prepared,
+  proposed,
+  ops,
+  { textAllowed = () => false } = {},
+) {
+  const sourceText = (tree, f) => textAllowed(tree, f, "source");
+  const targetText = (tree, f) => textAllowed(tree, f, "target");
+  const structureItems = (op) => ({
+    source: op.items.map((k) =>
+      itemLabel(
+        prepared.current.nodes[k].label,
+        firstText(prepared.current, k, sourceText)?.value,
+      ),
+    ),
+    // What the translation holds today, in its own order.
+    before: (
+      prepared.targetTree?.containers[
+        `${prepared.mapping[op.nodeKey]}/${op.name}`
+      ]?.items || []
+    ).map((k) =>
+      itemLabel(
+        prepared.targetTree.nodes[k]?.label,
+        firstText(prepared.targetTree, k, targetText)?.value,
+      ),
+    ),
+    after: (
+      prepared.structureItems?.[op.id] || op.items.map((k) => ({ source: k }))
+    ).map(({ source: k, target }) => {
+      if (!k)
+        return itemLabel(
+          prepared.targetTree.nodes[target]?.label,
+          firstText(prepared.targetTree, target, targetText)?.value,
+        );
+      const field = firstText(prepared.current, k, sourceText);
+      const path = prepared.appliedPaths?.[k];
+      // A module the translation already has may keep its own text there.
+      const targetKey = prepared.mapping[k];
+      const targetField =
+        field && targetKey
+          ? prepared.targetTree?.fields[`${targetKey}/${field.name}`]
+          : null;
+      const readable =
+        field &&
+        path &&
+        (!targetKey ||
+          (targetField && targetText(prepared.targetTree, targetField)));
+      return itemLabel(
+        prepared.current.nodes[k].label,
+        readable ? get(proposed, path.concat(field.name)) : null,
+      );
+    }),
+  });
   const groups = new Map();
   for (const op of ops) {
     const key = op.moduleKey;
@@ -160,25 +238,21 @@ export function previewModules(prepared, proposed, ops) {
       kind: op.kind,
       name: op.name,
       type: op.type,
-      source:
-        op.kind === "field"
-          ? op.value
-          : op.items.map((k) => prepared.current.nodes[k].label),
-      before:
-        op.kind === "field"
-          ? prepared.targetTree?.fields[
-              `${prepared.mapping[op.nodeKey]}/${op.name}`
-            ]?.value
-          : op.beforeItems.map((k) => prepared.before.nodes[k]?.label),
-      after:
-        op.kind === "field"
-          ? get(
+      ...(op.kind === "field"
+        ? {
+            source: op.value,
+            before:
+              prepared.targetTree?.fields[
+                `${prepared.mapping[op.nodeKey]}/${op.name}`
+              ]?.value,
+            after: get(
               proposed,
               (prepared.appliedPaths?.[op.nodeKey] || targetPath).concat(
                 op.name,
               ),
-            )
-          : op.items.map((k) => prepared.current.nodes[k].label),
+            ),
+          }
+        : structureItems(op)),
     });
   }
   // Insertion is one structural operation, but every generated field must
