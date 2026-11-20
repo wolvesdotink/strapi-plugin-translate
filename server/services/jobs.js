@@ -48,6 +48,8 @@ const snapshot = (job) => ({
   startedAt: job.startedAt,
   finishedAt: job.finishedAt || null,
   uid: job.uid,
+  // Every content type a multi-type bulk job touches (`uid` is null then).
+  uids: job.uids || undefined,
   documentId: job.documentId,
   sourceLocale: job.sourceLocale,
   // Legacy single-locale field — mirrors the active (or last-active) target.
@@ -64,6 +66,7 @@ const snapshot = (job) => ({
   activeTargetIndex: job.activeTargetIndex,
   // Bulk fan-out (documents × locales). Optional — only present when set.
   documents: job.documents ? job.documents.map((d) => ({
+    uid: d.uid || undefined,
     documentId: d.documentId,
     state: d.state,
     error: d.error || null,
@@ -156,6 +159,7 @@ export default ({ strapi }) => {
         const job = {
           id,
           uid: snap.uid,
+          uids: snap.uids,
           documentId: snap.documentId,
           sourceLocale: snap.sourceLocale,
           userId: snap.userId || null,
@@ -190,7 +194,7 @@ export default ({ strapi }) => {
     // Returns the live job record (a reference, not a copy) so the controller
     // can mutate state/progress/targets on it as the translation runs.
     // Accepts either `targetLocales: string[]` or legacy `targetLocale: string`.
-    create({ uid, documentId, sourceLocale, targetLocale, targetLocales, userId, documents, source }) {
+    create({ uid, uids, documentId, sourceLocale, targetLocale, targetLocales, userId, documents, source }) {
       cleanupExpired();
       const controller = new AbortController();
       const id =
@@ -214,13 +218,19 @@ export default ({ strapi }) => {
 
       // Bulk shape: an array of documents, each with its own target list.
       // Used by /translate/bulk. When present, `targets` mirrors the union
-      // of all per-doc target locales for legacy snapshot consumers.
+      // of all per-doc target locales for legacy snapshot consumers. A
+      // document may carry its own `uid` (multi-type jobs) and its own
+      // subset of `targetLocales` (e.g. only the locales it is missing in).
       const docsField = Array.isArray(documents) && documents.length
         ? documents.map((d) => ({
+            uid: d.uid || undefined,
             documentId: d.documentId,
             state: "pending",
             error: null,
-            targets: locales.map((locale) => ({
+            targets: (Array.isArray(d.targetLocales)
+              ? locales.filter((l) => d.targetLocales.includes(l))
+              : locales
+            ).map((locale) => ({
               locale,
               state: "pending",
               progress: emptyFormatProgress(),
@@ -233,6 +243,7 @@ export default ({ strapi }) => {
       const job = {
         id,
         uid,
+        uids: Array.isArray(uids) && uids.length ? uids.slice() : undefined,
         documentId,
         sourceLocale,
         userId: userId || null,

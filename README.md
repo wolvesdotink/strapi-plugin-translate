@@ -10,6 +10,7 @@ AI-powered translation of localized Strapi v5 entries via [OpenRouter](https://o
 - **Schema-aware walker** — handles components, dynamic zones, repeatable components, Strapi blocks (rich-text JSON), and CKEditor HTML.
 - **Format-aware prompts** — preserves Markdown, HTML, and Strapi-blocks structure exactly; translates only human-readable text nodes.
 - **Multi-locale batches** — pick several targets at once; they're processed sequentially with a live progress bar.
+- **Fill a new language** — on the Bulk translate page, pick **All content types** to translate everything into a newly added locale. By default only content missing in the target locale is translated, and linked content types go first so links point to the new translations.
 - **Cancellable jobs** — abort in-flight translations from the UI.
 - **Voice & glossary** — admin-editable tonality instructions, plus a per-locale glossary and a preserve-exactly list (brand/place names).
 - **Stale-relation preflight** — verifies relations/media exist before burning LLM tokens; surfaces dangling refs as warnings instead of aborting.
@@ -162,7 +163,7 @@ Edits are stored in `strapi.store` and picked up on the next translation job. "R
 
 ## Supported locales
 
-The plugin reads locales from `@strapi/i18n` at request time — whatever locales you enable in `Settings → Internationalization` become valid targets. No code change required to add a locale. (If the i18n plugin is unavailable, a small fallback set is used so the plugin still loads.)
+The plugin reads locales from `@strapi/i18n` at request time — whatever locales you enable in `Settings → Internationalization` become valid targets. No code change required to add a locale. To fill a new locale with your existing content, open **Bulk translate**, choose **All content types** and pick the new locale as the target. (If the i18n plugin is unavailable, a small fallback set is used so the plugin still loads.)
 
 ## Glossary file
 
@@ -188,6 +189,8 @@ All routes are admin-scoped (require an authenticated admin user).
 | ------ | --------------------------------- | -------------------------------------------------------- |
 | POST   | `/translate/document`             | Start a translation job (returns jobId)                  |
 | POST   | `/translate/bulk`                 | Translate many documents of one CT at once               |
+| POST   | `/translate/bulk/locale/coverage` | Count documents missing per target locale, per CT        |
+| POST   | `/translate/bulk/locale`          | Translate all content (or chosen CTs) into locales       |
 | POST   | `/translate/estimate`             | Token + cost estimate (no provider calls billed)         |
 | POST   | `/translate/preview`              | Translate but stage for review                           |
 | GET    | `/translate/preview/:id`          | Read a staged preview                                    |

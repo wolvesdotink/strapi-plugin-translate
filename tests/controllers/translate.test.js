@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import controllerFactory from "../../server/controllers/translate.js";
+import jobsFactory from "../../server/services/jobs.js";
 
 // The controller is a thin HTTP adapter. We exercise each new endpoint via a
 // minimal ctx mock with mocked plugin services. Strapi production wiring
@@ -50,10 +51,11 @@ const makeStrapi = ({
   models = {},
   fieldsDescribe,
   localesList,
+  translateService,
 } = {}) => {
   const services = {
     jobs: () => jobs || { list: () => [] },
-    translate: () => ({}),
+    translate: () => translateService || {},
     settings: () => ({}),
     locales: () => ({
       async list() {
@@ -401,5 +403,242 @@ describe("translate controller — contentList", () => {
     const ctx = makeCtx({ body: {} });
     await ctrl.contentList(ctx);
     expect(ctx.status).toBe(400);
+  });
+});
+
+describe("translate controller — bulk translate into a locale", () => {
+  const localized = (displayName, attributes = {}) => ({
+    kind: "collectionType",
+    info: { displayName },
+    pluginOptions: { i18n: { localized: true } },
+    attributes,
+  });
+  const contentTypes = {
+    "api::article.article": localized("Article", {
+      title: { type: "string" },
+      category: { type: "relation", relation: "manyToOne", target: "api::category.category" },
+    }),
+    "api::category.category": localized("Category", {
+      name: { type: "string" },
+      // Not copied by translations (relations default to "skip"), so it
+      // must not make Category depend on Article.
+      featured: { type: "relation", relation: "oneToOne", target: "api::article.article" },
+    }),
+    "api::secret.secret": localized("Secret", { title: { type: "string" } }),
+  };
+  // documentIds per uid and locale.
+  const initialRows = () => ({
+    "api::article.article": { de: ["a1", "a2"], en: ["a1"], fr: [] },
+    "api::category.category": { de: ["c1"], en: [], fr: [] },
+    "api::secret.secret": { de: ["s1"], en: [], fr: [] },
+  });
+  let rows = initialRows();
+  const documentsByUid = Object.fromEntries(
+    Object.keys(rows).map((uid) => [
+      uid,
+      {
+        async findMany({ locale }) {
+          return (rows[uid][locale] || []).map((documentId) => ({ documentId }));
+        },
+        async findOne({ documentId, locale }) {
+          return (rows[uid][locale] || []).includes(documentId) ? { documentId } : null;
+        },
+      },
+    ])
+  );
+  const setup = ({ can = () => true, calls = [], onTranslate } = {}) => {
+    const strapi = makeStrapi({
+      contentTypes,
+      models: contentTypes,
+      documentsByUid,
+      fieldsDescribe: (uid) => ({
+        uid,
+        attributes: [
+          { name: "title", type: "string", directive: "translate" },
+          ...(uid === "api::article.article"
+            ? [{ name: "category", type: "relation", directive: "copy", target: "api::category.category" }]
+            : []),
+          ...(uid === "api::category.category"
+            ? [{ name: "featured", type: "relation", directive: "skip", target: "api::article.article" }]
+            : []),
+        ],
+      }),
+      translateService: {
+        async translateDocument(args) {
+          onTranslate?.(args);
+          calls.push(`${args.uid}:${args.documentId}:${args.targetLocale}`);
+          return { entry: { documentId: args.documentId, locale: args.targetLocale }, warnings: [] };
+        },
+      },
+    });
+    const jobs = jobsFactory({ strapi: { ...strapi, plugin: () => ({ config: { persistJobs: false } }) } });
+    strapi.plugin = ((orig) => (id) => {
+      const p = orig(id);
+      return { ...p, service: (name) => (name === "jobs" ? jobs : p.service(name)) };
+    })(strapi.plugin);
+    const ability = { can };
+    return { ctrl: controllerFactory({ strapi }), jobs, ability };
+  };
+  const ctxFor = (ability, body) => makeCtx({ body, state: { user: { id: 1 }, userAbility: ability } });
+  const waitFor = async (jobs, id) => {
+    for (let i = 0; i < 50; i++) {
+      const snap = jobs.get(id);
+      if (["done", "failed", "cancelled", "partial"].includes(snap.state)) return snap;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error("job did not finish");
+  };
+
+  beforeEach(() => {
+    jobsFactory({ strapi: {} })._reset();
+    rows = initialRows();
+  });
+
+  it("reports missing documents per target locale, limited to types the caller can update", async () => {
+    const { ctrl, ability } = setup({
+      can: (action, uid) => !(uid === "api::secret.secret" && action.endsWith(".update")),
+    });
+    const ctx = ctxFor(ability, { sourceLocale: "de", targetLocales: ["en", "fr"] });
+    await ctrl.localeCoverage(ctx);
+    expect(ctx.body.contentTypes.map((c) => [c.uid, c.sourceCount, c.missing])).toEqual([
+      ["api::article.article", 2, { en: 1, fr: 2 }],
+      ["api::category.category", 1, { en: 1, fr: 1 }],
+    ]);
+  });
+
+  it("translates only what is missing, linked types first", async () => {
+    const calls = [];
+    const { ctrl, jobs, ability } = setup({ calls });
+    // Category listed first: only Article's copied link counts, so
+    // Category still goes first.
+    const ctx = ctxFor(ability, {
+      sourceLocale: "de",
+      targetLocales: ["en", "fr"],
+      uids: ["api::category.category", "api::article.article"],
+    });
+    await ctrl.bulkTranslateLocale(ctx);
+    expect(ctx.status).toBe(202);
+    const snap = await waitFor(jobs, ctx.body.jobId);
+    expect(calls).toEqual([
+      "api::category.category:c1:en",
+      "api::category.category:c1:fr",
+      "api::article.article:a1:fr",
+      "api::article.article:a2:en",
+      "api::article.article:a2:fr",
+    ]);
+    expect(snap.state).toBe("done");
+    expect(snap.uid).toBe(null);
+    expect(snap.uids).toEqual(["api::category.category", "api::article.article"]);
+    expect(snap.targets.map((t) => t.state)).toEqual(["done", "done"]);
+  });
+
+  it("retranslates everything when onlyMissing is false", async () => {
+    const calls = [];
+    const { ctrl, jobs, ability } = setup({ calls });
+    const ctx = ctxFor(ability, {
+      sourceLocale: "de",
+      targetLocales: ["en"],
+      uids: ["api::article.article"],
+      onlyMissing: false,
+    });
+    await ctrl.bulkTranslateLocale(ctx);
+    await waitFor(jobs, ctx.body.jobId);
+    expect(calls).toEqual(["api::article.article:a1:en", "api::article.article:a2:en"]);
+  });
+
+  it("400s when every document already exists in the target locale", async () => {
+    const { ctrl, ability } = setup();
+    const ctx = ctxFor(ability, {
+      sourceLocale: "en",
+      targetLocales: ["de"],
+      uids: ["api::article.article"],
+    });
+    await ctrl.bulkTranslateLocale(ctx);
+    expect(ctx.status).toBe(400);
+  });
+
+  it("403s for a content type the caller cannot update", async () => {
+    const { ctrl, ability } = setup({
+      can: (action, uid) => !(uid === "api::secret.secret" && action.endsWith(".update")),
+    });
+    const ctx = ctxFor(ability, {
+      sourceLocale: "de",
+      targetLocales: ["en"],
+      uids: ["api::secret.secret"],
+    });
+    await ctrl.bulkTranslateLocale(ctx);
+    expect(ctx.status).toBe(403);
+  });
+
+  it("hides a multi-type job from editors who cannot read one of its types", async () => {
+    const { ctrl, jobs, ability } = setup();
+    const ctx = ctxFor(ability, { sourceLocale: "de", targetLocales: ["en"] });
+    await ctrl.bulkTranslateLocale(ctx);
+    await waitFor(jobs, ctx.body.jobId);
+    const limited = { can: (_a, uid) => uid !== "api::secret.secret" };
+    const getCtx = makeCtx({ params: { id: ctx.body.jobId }, state: { user: { id: 2 }, userAbility: limited } });
+    await ctrl.getJob(getCtx);
+    expect(getCtx.status).toBe(404);
+    const listCtx = makeCtx({ state: { user: { id: 2 }, userAbility: limited } });
+    await ctrl.listJobs(listCtx);
+    expect(listCtx.body.jobs).toEqual([]);
+  });
+});
+
+describe("translate controller — bulk translate into a locale (late drafts)", () => {
+  it("leaves a draft created after queueing alone and lists only locales with work", async () => {
+    const rows = { de: ["a1", "a2"], en: ["a1"], fr: ["a1", "a2"] };
+    const calls = [];
+    const strapi = makeStrapi({
+      contentTypes: {
+        "api::article.article": {
+          kind: "collectionType",
+          info: { displayName: "Article" },
+          pluginOptions: { i18n: { localized: true } },
+        },
+      },
+      documentsByUid: {
+        "api::article.article": {
+          async findMany({ locale }) {
+            return (rows[locale] || []).map((documentId) => ({ documentId }));
+          },
+          async findOne({ documentId, locale }) {
+            await new Promise((r) => setTimeout(r, 0));
+            return (rows[locale] || []).includes(documentId) ? { documentId } : null;
+          },
+        },
+      },
+      fieldsDescribe: (uid) => ({
+        uid,
+        attributes: [{ name: "title", type: "string", directive: "translate" }],
+      }),
+      translateService: {
+        async translateDocument(args) {
+          calls.push(args.documentId);
+          return { entry: { documentId: args.documentId, locale: args.targetLocale }, warnings: [] };
+        },
+      },
+    });
+    jobsFactory({ strapi: {} })._reset();
+    const jobsSvc = jobsFactory({ strapi: { ...strapi, plugin: () => ({ config: { persistJobs: false } }) } });
+    strapi.plugin = ((orig) => (id) => {
+      const p = orig(id);
+      return { ...p, service: (name) => (name === "jobs" ? jobsSvc : p.service(name)) };
+    })(strapi.plugin);
+    const ctrl = controllerFactory({ strapi });
+    const ctx = makeCtx({ body: { sourceLocale: "de", targetLocales: ["en", "fr"] } });
+    await ctrl.bulkTranslateLocale(ctx);
+    expect(ctx.status).toBe(202);
+    // An editor creates the English a2 draft before the job reaches it.
+    rows.en.push("a2");
+    let snap;
+    for (let i = 0; i < 50; i++) {
+      snap = jobsSvc.get(ctx.body.jobId);
+      if (snap.state === "done") break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(calls).toEqual([]);
+    expect(snap.targets.map((t) => t.locale)).toEqual(["en"]);
+    expect(snap.documents[0].targets[0].result.skipped).toBe(true);
   });
 });
