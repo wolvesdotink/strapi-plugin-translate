@@ -200,6 +200,70 @@ const deriveOverallState = (targets) => {
   return "done";
 };
 
+// Content types a job touches: `uids` for multi-type bulk jobs, otherwise
+// the single `uid` (none for jobs that aren't tied to a content type).
+const jobUids = (job) =>
+  Array.isArray(job.uids) && job.uids.length ? job.uids : job.uid ? [job.uid] : [];
+
+// Every content type a translation of `uid` writes links to: relations the
+// field config marks "copy", including ones nested in translated components
+// and dynamic zones. Skipped relations (the default) are never written, so
+// they don't count.
+const relationTargets = (fieldsService, uid) => {
+  const out = new Set();
+  const seen = new Set();
+  const walk = (modelUid) => {
+    if (!modelUid || seen.has(modelUid)) return;
+    seen.add(modelUid);
+    let attrs;
+    try {
+      attrs = fieldsService.describe(modelUid).attributes;
+    } catch {
+      return;
+    }
+    for (const attr of attrs) {
+      if (attr.type === "relation" && attr.directive === "copy" && attr.target) out.add(attr.target);
+      // Containers marked "copy" are copied wholesale; only "translate" ones
+      // are walked field by field, so only their relations are written.
+      if (attr.directive !== "translate") continue;
+      if (attr.type === "component") walk(attr.component);
+      else if (attr.type === "dynamiczone") for (const c of attr.components || []) walk(c);
+    }
+  };
+  walk(uid);
+  return out;
+};
+
+// Order content types so linked types come before the types that link to
+// them. Translating a category before the articles pointing at it lets the
+// articles' links resolve to the new-language category in the same run.
+// Cycles are broken by the original order.
+const orderByDependencies = (fieldsService, uids) => {
+  const included = new Set(uids);
+  const visited = new Set();
+  const order = [];
+  const visit = (uid) => {
+    if (visited.has(uid)) return;
+    visited.add(uid);
+    for (const dep of relationTargets(fieldsService, uid)) {
+      if (dep !== uid && included.has(dep)) visit(dep);
+    }
+    order.push(uid);
+  };
+  for (const uid of uids) visit(uid);
+  return order;
+};
+
+const TRANSLATABLE_TYPES = new Set([
+  "string",
+  "text",
+  "richtext",
+  "blocks",
+  "component",
+  "dynamiczone",
+]);
+const DOC_ID_PAGE_SIZE = 500;
+
 export default ({ strapi }) => {
   const jobs = () => strapi.plugin("translate").service("jobs");
   const translate = () => strapi.plugin("translate").service("translate");
@@ -207,6 +271,278 @@ export default ({ strapi }) => {
   const localesSvc = () => strapi.plugin("translate").service("locales");
   const cache = () => strapi.plugin("translate").service("cache");
   const preview = () => strapi.plugin("translate").service("preview");
+
+  // Validate `sourceLocale` + `targetLocales` (or legacy `targetLocale`)
+  // from a request body. Returns the de-duplicated targets, or null after
+  // answering 400. With `defaultSource`, a missing source falls back to the
+  // default locale.
+  const validateLocales = async (ctx, body, { requireTargets, defaultSource = false }) => {
+    const rawTargets = Array.isArray(body.targetLocales)
+      ? body.targetLocales
+      : body.targetLocale
+      ? [body.targetLocale]
+      : [];
+    if (requireTargets && rawTargets.length === 0) {
+      ctx.badRequest("targetLocales is required");
+      return null;
+    }
+    const supported = await localesSvc().codes();
+    let sourceLocale = body.sourceLocale;
+    if (!sourceLocale && defaultSource) {
+      sourceLocale = (await localesSvc().list()).find((l) => l.isDefault)?.code;
+      if (!sourceLocale) {
+        ctx.badRequest("sourceLocale is required");
+        return null;
+      }
+    }
+    const targetLocales = [];
+    for (const code of rawTargets) {
+      if (typeof code !== "string" || !code) {
+        ctx.badRequest("targetLocales must be non-empty strings");
+        return null;
+      }
+      if (!supported.has(code)) {
+        ctx.badRequest(`unsupported targetLocale: ${code}`);
+        return null;
+      }
+      if (sourceLocale && code === sourceLocale) {
+        ctx.badRequest(`targetLocale ${code} matches sourceLocale; nothing to translate`);
+        return null;
+      }
+      if (!targetLocales.includes(code)) targetLocales.push(code);
+    }
+    if (sourceLocale && !supported.has(sourceLocale)) {
+      ctx.badRequest(`unsupported sourceLocale: ${sourceLocale}`);
+      return null;
+    }
+    return { sourceLocale, targetLocales };
+  };
+
+  // Localized api:: content types with at least one translatable field.
+  const translatableContentTypes = () => {
+    const fieldsService = strapi.plugin("translate").service("translatable-fields");
+    const out = [];
+    for (const [uid, schema] of Object.entries(strapi.contentTypes || {})) {
+      if (!schema || typeof schema !== "object") continue;
+      if (!uid.startsWith("api::")) continue;
+      if (!schema.pluginOptions?.i18n?.localized) continue;
+      let attrs;
+      try {
+        attrs = fieldsService.describe(uid).attributes;
+      } catch {
+        continue;
+      }
+      const translatable = attrs.filter(
+        (a) => a.directive === "translate" && TRANSLATABLE_TYPES.has(a.type)
+      );
+      if (translatable.length === 0) continue;
+      out.push({
+        uid,
+        kind: schema.kind,
+        displayName: schema.info?.displayName || schema.info?.singularName || uid,
+        translatableFieldCount: translatable.length,
+      });
+    }
+    out.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    return out;
+  };
+
+  // Translatable content types the caller may bulk translate: the same
+  // read + update pair the single-type /bulk route's policy requires.
+  const bulkableContentTypes = (ctx) =>
+    translatableContentTypes().filter(
+      (ct) =>
+        userCanOrDeny(ctx, ct.uid, READ_ACTION) &&
+        userCanOrDeny(ctx, ct.uid, UPDATE_ACTION)
+    );
+
+  // Every documentId of `uid` that has a draft in `locale`.
+  const listDocumentIds = async (uid, locale) => {
+    const ids = new Set();
+    for (let start = 0; ; start += DOC_ID_PAGE_SIZE) {
+      const batch = await strapi.documents(uid).findMany({
+        locale,
+        status: "draft",
+        fields: ["documentId"],
+        sort: "id:asc",
+        start,
+        limit: DOC_ID_PAGE_SIZE,
+      });
+      for (const d of batch || []) if (d?.documentId) ids.add(d.documentId);
+      if (!batch || batch.length < DOC_ID_PAGE_SIZE) break;
+    }
+    return [...ids];
+  };
+
+  // Run a bulk job (documents × their target locales) in the background.
+  // Documents are processed one after another, and each document's locales
+  // sequentially, so provider load doesn't multiply. Each document may carry
+  // its own `uid` (multi-type jobs) and its own subset of target locales.
+  // With `onlyMissing`, a target that gained a draft after the job was
+  // queued (an editor, another job) is left alone and reported as skipped.
+  const runBulkJob = (job, { onlyMissing = false } = {}) => {
+    job.state = "running";
+    const actingUserId = job.userId || null;
+
+    // Derive a per-locale aggregate state from every doc's same-locale
+    // target. Surfaced on the legacy top-level job.targets[] so JobHistory
+    // (and any other snapshot consumer) sees real progress instead of
+    // permanently-pending badges.
+    const aggregateTopLevelTargets = () => {
+      for (const top of job.targets) {
+        let done = 0;
+        let failed = 0;
+        let cancelled = 0;
+        let pending = 0;
+        let running = 0;
+        let total = 0;
+        for (const d of job.documents) {
+          const t = d.targets.find((x) => x.locale === top.locale);
+          if (!t) continue;
+          total += 1;
+          if (t.state === "done") done += 1;
+          else if (t.state === "failed") failed += 1;
+          else if (t.state === "cancelled") cancelled += 1;
+          else if (t.state === "running") running += 1;
+          else pending += 1;
+        }
+        let agg;
+        if (running > 0) agg = "running";
+        else if (pending > 0 && done + failed + cancelled === 0) agg = "pending";
+        else if (cancelled > 0 && done < total) agg = "cancelled";
+        else if (failed > 0 && done === 0) agg = "failed";
+        else if (failed > 0 || cancelled > 0 || pending > 0) agg = "partial";
+        else agg = "done";
+        top.state = agg;
+      }
+    };
+
+    (async () => {
+      const docs = job.documents;
+      for (let di = 0; di < docs.length; di++) {
+        if (job.signal.aborted) break;
+        const doc = docs[di];
+        doc.state = "running";
+        let anyFailed = false;
+        let anyTargetRan = false;
+        for (let ti = 0; ti < doc.targets.length; ti++) {
+          if (job.signal.aborted) {
+            // Mark untouched targets cancelled so the snapshot reflects
+            // reality instead of leaving them pending forever.
+            for (let tj = ti; tj < doc.targets.length; tj++) {
+              if (doc.targets[tj].state === "pending") {
+                doc.targets[tj].state = "cancelled";
+              }
+            }
+            break;
+          }
+          anyTargetRan = true;
+          const target = doc.targets[ti];
+          target.state = "running";
+          try {
+            if (onlyMissing) {
+              const existing = await strapi.documents(doc.uid || job.uid).findOne({
+                documentId: doc.documentId,
+                locale: target.locale,
+                status: "draft",
+                fields: ["documentId"],
+              });
+              if (existing) {
+                target.state = "done";
+                target.result = {
+                  documentId: doc.documentId,
+                  locale: target.locale,
+                  skipped: true,
+                  warnings: [],
+                };
+                continue;
+              }
+            }
+            const { entry, warnings } = await translate().translateDocument({
+              uid: doc.uid || job.uid,
+              documentId: doc.documentId,
+              sourceLocale: job.sourceLocale,
+              targetLocale: target.locale,
+              actingUserId,
+              signal: job.signal,
+              onProgress: ({ format, done, total }) => {
+                if (target.progress[format]) {
+                  target.progress[format] = { done, total };
+                }
+              },
+            });
+            target.state = "done";
+            target.result = {
+              documentId: entry.documentId,
+              locale: entry.locale,
+              warnings: warnings || [],
+            };
+          } catch (err) {
+            if (err?.name === "AbortError" || job.signal.aborted) {
+              target.state = "cancelled";
+              anyFailed = true;
+              // Mark the remaining untouched targets cancelled too.
+              for (let tj = ti + 1; tj < doc.targets.length; tj++) {
+                if (doc.targets[tj].state === "pending") {
+                  doc.targets[tj].state = "cancelled";
+                }
+              }
+              break;
+            }
+            target.state = "failed";
+            target.error = err?.message || String(err);
+            anyFailed = true;
+          }
+        }
+        const allDone = doc.targets.every((t) => t.state === "done");
+        const anyDone = doc.targets.some((t) => t.state === "done");
+        const anyCancelled = doc.targets.some((t) => t.state === "cancelled");
+        if (allDone) {
+          doc.state = "done";
+        } else if (anyDone) {
+          doc.state = "partial";
+        } else if (!anyTargetRan && anyCancelled) {
+          doc.state = "cancelled";
+        } else if (anyFailed && anyCancelled) {
+          doc.state = "cancelled";
+        } else if (anyFailed) {
+          doc.state = "failed";
+        } else {
+          // No targets ran AND none are cancelled means the outer abort
+          // fired before this doc even started — treat as cancelled.
+          doc.state = "cancelled";
+        }
+        aggregateTopLevelTargets();
+      }
+      // Documents never reached because of a cancel stay pending otherwise.
+      for (const d of docs) {
+        if (d.state !== "pending") continue;
+        d.state = "cancelled";
+        for (const t of d.targets) if (t.state === "pending") t.state = "cancelled";
+      }
+      aggregateTopLevelTargets();
+      // Overall state derivation.
+      const counts = { done: 0, failed: 0, cancelled: 0, partial: 0 };
+      for (const d of docs) counts[d.state] = (counts[d.state] || 0) + 1;
+      if (counts.cancelled > 0 && counts.done < docs.length) {
+        job.state = "cancelled";
+      } else if (counts.done === docs.length) {
+        job.state = "done";
+      } else if (counts.done > 0 || counts.partial > 0) {
+        job.state = "partial";
+      } else {
+        job.state = "failed";
+      }
+      job.finishedAt = Date.now();
+    })().catch((err) => {
+      job.state = "failed";
+      job.error = err?.message || String(err);
+      job.finishedAt = Date.now();
+      strapi.log.error(
+        `[translate] bulk job ${job.id} crashed: ${err?.message || err}`
+      );
+    });
+  };
 
   return {
     /**
@@ -373,190 +709,147 @@ export default ({ strapi }) => {
       const body = ctx.request.body || {};
       const { uid, sourceLocale } = body;
       const documentIds = Array.isArray(body.documentIds) ? body.documentIds : [];
-      const rawTargets = Array.isArray(body.targetLocales)
-        ? body.targetLocales
-        : body.targetLocale
-        ? [body.targetLocale]
-        : [];
 
       if (!uid) return ctx.badRequest("uid is required");
       if (documentIds.length === 0) {
         return ctx.badRequest("documentIds must be a non-empty array");
       }
-      if (rawTargets.length === 0) {
-        return ctx.badRequest("targetLocales is required");
-      }
-      const supported = await localesSvc().codes();
-      const seen = new Set();
-      const targetLocales = [];
-      for (const code of rawTargets) {
-        if (typeof code !== "string" || !code) {
-          return ctx.badRequest("targetLocales must be non-empty strings");
-        }
-        if (!supported.has(code)) {
-          return ctx.badRequest(`unsupported targetLocale: ${code}`);
-        }
-        if (sourceLocale && code === sourceLocale) {
-          return ctx.badRequest(
-            `targetLocale ${code} matches sourceLocale; nothing to translate`
-          );
-        }
-        if (!seen.has(code)) {
-          seen.add(code);
-          targetLocales.push(code);
-        }
-      }
-      if (sourceLocale && !supported.has(sourceLocale)) {
-        return ctx.badRequest(`unsupported sourceLocale: ${sourceLocale}`);
-      }
+      const locales = await validateLocales(ctx, body, { requireTargets: true });
+      if (!locales) return undefined;
 
-      const actingUserId = ctx.state?.user?.id || null;
       const job = jobs().create({
         uid,
         documentId: null,
         sourceLocale,
-        targetLocales,
-        userId: actingUserId,
+        targetLocales: locales.targetLocales,
+        userId: ctx.state?.user?.id || null,
         documents: documentIds.map((id) => ({ documentId: id })),
       });
-      job.state = "running";
-
-      // Derive a per-locale aggregate state from every doc's same-locale
-      // target. Surfaced on the legacy top-level job.targets[] so JobHistory
-      // (and any other snapshot consumer) sees real progress instead of
-      // permanently-pending badges.
-      const aggregateTopLevelTargets = () => {
-        for (let li = 0; li < job.targets.length; li++) {
-          const locale = job.targets[li].locale;
-          let done = 0;
-          let failed = 0;
-          let cancelled = 0;
-          let pending = 0;
-          let running = 0;
-          for (const d of job.documents) {
-            const t = d.targets[li];
-            if (!t) continue;
-            if (t.state === "done") done += 1;
-            else if (t.state === "failed") failed += 1;
-            else if (t.state === "cancelled") cancelled += 1;
-            else if (t.state === "running") running += 1;
-            else pending += 1;
-          }
-          let agg;
-          if (running > 0) agg = "running";
-          else if (pending > 0 && done + failed + cancelled === 0) agg = "pending";
-          else if (cancelled > 0 && done < job.documents.length) agg = "cancelled";
-          else if (failed > 0 && done === 0) agg = "failed";
-          else if (failed > 0 || cancelled > 0 || pending > 0) agg = "partial";
-          else agg = "done";
-          job.targets[li].state = agg;
-        }
-      };
-
-      (async () => {
-        const docs = job.documents;
-        for (let di = 0; di < docs.length; di++) {
-          if (job.signal.aborted) break;
-          const doc = docs[di];
-          doc.state = "running";
-          let anyFailed = false;
-          let anyTargetRan = false;
-          for (let ti = 0; ti < doc.targets.length; ti++) {
-            if (job.signal.aborted) {
-              // Mark untouched targets cancelled so the snapshot reflects
-              // reality instead of leaving them pending forever.
-              for (let tj = ti; tj < doc.targets.length; tj++) {
-                if (doc.targets[tj].state === "pending") {
-                  doc.targets[tj].state = "cancelled";
-                }
-              }
-              break;
-            }
-            anyTargetRan = true;
-            const target = doc.targets[ti];
-            target.state = "running";
-            try {
-              const { entry, warnings } = await translate().translateDocument({
-                uid,
-                documentId: doc.documentId,
-                sourceLocale,
-                targetLocale: target.locale,
-                actingUserId,
-                signal: job.signal,
-                onProgress: ({ format, done, total }) => {
-                  if (target.progress[format]) {
-                    target.progress[format] = { done, total };
-                  }
-                },
-              });
-              target.state = "done";
-              target.result = {
-                documentId: entry.documentId,
-                locale: entry.locale,
-                warnings: warnings || [],
-              };
-            } catch (err) {
-              if (err?.name === "AbortError" || job.signal.aborted) {
-                target.state = "cancelled";
-                anyFailed = true;
-                // Mark the remaining untouched targets cancelled too.
-                for (let tj = ti + 1; tj < doc.targets.length; tj++) {
-                  if (doc.targets[tj].state === "pending") {
-                    doc.targets[tj].state = "cancelled";
-                  }
-                }
-                break;
-              }
-              target.state = "failed";
-              target.error = err?.message || String(err);
-              anyFailed = true;
-            }
-          }
-          const allDone = doc.targets.every((t) => t.state === "done");
-          const anyDone = doc.targets.some((t) => t.state === "done");
-          const anyCancelled = doc.targets.some((t) => t.state === "cancelled");
-          if (allDone) {
-            doc.state = "done";
-          } else if (anyDone) {
-            doc.state = "partial";
-          } else if (!anyTargetRan && anyCancelled) {
-            doc.state = "cancelled";
-          } else if (anyFailed && anyCancelled) {
-            doc.state = "cancelled";
-          } else if (anyFailed) {
-            doc.state = "failed";
-          } else {
-            // No targets ran AND none are cancelled means the outer abort
-            // fired before this doc even started — treat as cancelled.
-            doc.state = "cancelled";
-          }
-          aggregateTopLevelTargets();
-        }
-        aggregateTopLevelTargets();
-        // Overall state derivation.
-        const counts = { done: 0, failed: 0, cancelled: 0, partial: 0 };
-        for (const d of docs) counts[d.state] = (counts[d.state] || 0) + 1;
-        if (counts.cancelled > 0 && counts.done < docs.length) {
-          job.state = "cancelled";
-        } else if (counts.done === docs.length) {
-          job.state = "done";
-        } else if (counts.done > 0 || counts.partial > 0) {
-          job.state = "partial";
-        } else {
-          job.state = "failed";
-        }
-        job.finishedAt = Date.now();
-      })().catch((err) => {
-        job.state = "failed";
-        job.error = err?.message || String(err);
-        job.finishedAt = Date.now();
-        strapi.log.error(
-          `[translate] bulk job ${job.id} crashed: ${err?.message || err}`
-        );
-      });
+      runBulkJob(job);
 
       ctx.status = 202;
       ctx.body = { jobId: job.id };
+    },
+
+    /**
+     * POST /translate/bulk/locale/coverage
+     * body: { sourceLocale?, targetLocales? }
+     * For every translatable content type the caller may bulk translate,
+     * counts the documents in the source locale and how many of them have
+     * no version yet in each target locale. Feeds the "all content" mode of
+     * the bulk page, typically used right after adding a new language.
+     */
+    async localeCoverage(ctx) {
+      const body = ctx.request.body || {};
+      const locales = await validateLocales(ctx, body, {
+        requireTargets: false,
+        defaultSource: true,
+      });
+      if (!locales) return undefined;
+      const { sourceLocale, targetLocales } = locales;
+      const out = [];
+      try {
+        for (const ct of bulkableContentTypes(ctx)) {
+          const sourceIds = await listDocumentIds(ct.uid, sourceLocale);
+          const missing = {};
+          for (const locale of targetLocales) {
+            const existing = new Set(await listDocumentIds(ct.uid, locale));
+            missing[locale] = sourceIds.filter((id) => !existing.has(id)).length;
+          }
+          out.push({ ...ct, sourceCount: sourceIds.length, missing });
+        }
+      } catch (err) {
+        return fail(ctx, err);
+      }
+      ctx.body = { sourceLocale, targetLocales, contentTypes: out };
+    },
+
+    /**
+     * POST /translate/bulk/locale
+     * body: { sourceLocale?, targetLocales, uids?, onlyMissing? = true }
+     * Translates every document of every selected content type (default:
+     * all the caller may bulk translate) into the target locales. With
+     * `onlyMissing`, a document is only translated into the locales it has
+     * no version in yet, so existing translations are left alone. Content
+     * types are ordered so that linked types are translated before the
+     * types that link to them.
+     */
+    async bulkTranslateLocale(ctx) {
+      const body = ctx.request.body || {};
+      const locales = await validateLocales(ctx, body, {
+        requireTargets: true,
+        defaultSource: true,
+      });
+      if (!locales) return undefined;
+      const { sourceLocale, targetLocales } = locales;
+      const onlyMissing = body.onlyMissing !== false;
+
+      const allowed = bulkableContentTypes(ctx).map((ct) => ct.uid);
+      let uids = allowed;
+      if (body.uids !== undefined) {
+        if (!Array.isArray(body.uids) || body.uids.length === 0) {
+          return ctx.badRequest("uids must be a non-empty array");
+        }
+        for (const uid of body.uids) {
+          if (!allowed.includes(uid)) {
+            return ctx.forbidden(`content type not available for bulk translation: ${uid}`);
+          }
+        }
+        uids = allowed.filter((uid) => body.uids.includes(uid));
+      }
+
+      const documents = [];
+      const usedUids = [];
+      try {
+        const fieldsService = strapi.plugin("translate").service("translatable-fields");
+        for (const uid of orderByDependencies(fieldsService, uids)) {
+          const sourceIds = await listDocumentIds(uid, sourceLocale);
+          if (sourceIds.length === 0) continue;
+          const existing = {};
+          if (onlyMissing) {
+            for (const locale of targetLocales) {
+              existing[locale] = new Set(await listDocumentIds(uid, locale));
+            }
+          }
+          let added = false;
+          for (const documentId of sourceIds) {
+            const docTargets = onlyMissing
+              ? targetLocales.filter((l) => !existing[l].has(documentId))
+              : targetLocales;
+            if (docTargets.length === 0) continue;
+            documents.push({ uid, documentId, targetLocales: docTargets });
+            added = true;
+          }
+          if (added) usedUids.push(uid);
+        }
+      } catch (err) {
+        return fail(ctx, err);
+      }
+      if (documents.length === 0) {
+        return ctx.badRequest(
+          onlyMissing
+            ? "Nothing to translate: every document already exists in the target locale(s)."
+            : "Nothing to translate: no documents found in the source locale."
+        );
+      }
+
+      const job = jobs().create({
+        uid: usedUids.length === 1 ? usedUids[0] : null,
+        uids: usedUids,
+        documentId: null,
+        sourceLocale,
+        // Only locales with work, so History doesn't list a locale as done
+        // when nothing ran for it.
+        targetLocales: targetLocales.filter((l) =>
+          documents.some((d) => d.targetLocales.includes(l))
+        ),
+        userId: ctx.state?.user?.id || null,
+        documents,
+      });
+      runBulkJob(job, { onlyMissing });
+
+      ctx.status = 202;
+      ctx.body = { jobId: job.id, documents: documents.length, contentTypes: usedUids.length };
     },
 
     /**
@@ -567,7 +860,7 @@ export default ({ strapi }) => {
       const snapshot = jobs().get(id);
       if (!snapshot) return ctx.notFound("job not found");
       if (snapshot.source === "preview" && snapshot.userId !== ctx.state?.user?.id) return ctx.notFound("job not found");
-      if (snapshot.uid && !userCanOrDeny(ctx, snapshot.uid, READ_ACTION)) {
+      if (!jobUids(snapshot).every((uid) => userCanOrDeny(ctx, uid, READ_ACTION))) {
         return ctx.notFound("job not found");
       }
       if (snapshot.source === "preview") {
@@ -607,7 +900,7 @@ export default ({ strapi }) => {
       });
       // Fail closed: when userAbility is missing, return no jobs rather than
       // leaking the registry.
-      const filtered = all.filter((j) => userCanOrDeny(ctx, j.uid, READ_ACTION) && (j.source !== "preview" || j.userId === ctx.state?.user?.id))
+      const filtered = all.filter((j) => userCanOrDeny(ctx, null, READ_ACTION) && jobUids(j).every((uid) => userCanOrDeny(ctx, uid, READ_ACTION)) && (j.source !== "preview" || j.userId === ctx.state?.user?.id))
         .map(j => j.source === "preview" ? { ...j, targets: j.targets.map(target => ({ ...target, result: target.result ? { previewId: target.result.previewId, warnings: target.result.warnings || [] } : null })) } : j);
       ctx.body = {
         jobs: filtered.slice(0, limit),
@@ -623,7 +916,7 @@ export default ({ strapi }) => {
       const snapshot = jobs().get(id);
       if (!snapshot) return ctx.notFound("job not found");
       if (snapshot.source === "preview" && snapshot.userId !== ctx.state?.user?.id) return ctx.notFound("job not found");
-      if (snapshot.uid && !userCanOrDeny(ctx, snapshot.uid, UPDATE_ACTION)) {
+      if (!jobUids(snapshot).every((uid) => userCanOrDeny(ctx, uid, UPDATE_ACTION))) {
         return ctx.notFound("job not found");
       }
       const res = jobs().cancel(id);
@@ -1007,43 +1300,11 @@ export default ({ strapi }) => {
      * translatable field. Used by the bulk translation page.
      */
     async contentTypes(ctx) {
-      const fieldsService = strapi.plugin("translate").service("translatable-fields");
-      const all = strapi.contentTypes || {};
-      const out = [];
-      for (const [uid, schema] of Object.entries(all)) {
-        if (!schema || typeof schema !== "object") continue;
-        if (!uid.startsWith("api::")) continue;
-        const localized = !!schema.pluginOptions?.i18n?.localized;
-        if (!localized) continue;
-        let attrs;
-        try {
-          attrs = fieldsService.describe(uid).attributes;
-        } catch {
-          continue;
-        }
-        const translatable = attrs.filter(
-          (a) =>
-            a.directive === "translate" &&
-            (a.type === "string" ||
-              a.type === "text" ||
-              a.type === "richtext" ||
-              a.type === "blocks" ||
-              a.type === "component" ||
-              a.type === "dynamiczone")
-        );
-        if (translatable.length === 0) continue;
-        // Fail closed: without userAbility we cannot prove the caller has
-        // read permission, so omit the CT from the listing.
-        if (!userCanOrDeny(ctx, uid, READ_ACTION)) continue;
-        out.push({
-          uid,
-          kind: schema.kind,
-          displayName:
-            schema.info?.displayName || schema.info?.singularName || uid,
-          translatableFieldCount: translatable.length,
-        });
-      }
-      out.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      // Fail closed: without userAbility we cannot prove the caller has
+      // read permission, so omit the CT from the listing.
+      const out = translatableContentTypes().filter((ct) =>
+        userCanOrDeny(ctx, ct.uid, READ_ACTION)
+      );
       ctx.body = { contentTypes: out };
     },
 

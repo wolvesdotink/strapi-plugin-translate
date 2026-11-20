@@ -2,11 +2,15 @@
 // content type into one or many target locales in a single job.
 //
 // Flow:
-//   1. Pick a content type (from GET /translate/content-types).
+//   1. Pick a content type (from GET /translate/content-types), or
+//      "All content types" to fill a newly added language.
 //   2. Pick a source locale.
 //   3. Pick target locales (any locale ≠ source).
-//   4. Optionally narrow to selected documents (defaults to all in source locale).
-//   5. Start a /translate/bulk job, then poll for progress.
+//   4. Optionally narrow to selected documents (defaults to all in source
+//      locale). In "all" mode, narrow to selected content types instead,
+//      based on POST /translate/bulk/locale/coverage.
+//   5. Start a /translate/bulk (or /translate/bulk/locale) job, then poll
+//      for progress.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
@@ -38,6 +42,8 @@ const POLL_INTERVAL_MS = 1500;
 const DOCS_PAGE_SIZE = 200;
 const DOCS_HARD_CAP = 5000;
 const TERMINAL_JOB_STATES = new Set(["done", "failed", "cancelled", "partial"]);
+// Content-type select value for "translate every content type".
+const ALL_CONTENT = "__all__";
 
 // Localised label for a server-side job state. The server returns the raw
 // enum; the UI is responsible for translation.
@@ -77,6 +83,13 @@ const BulkTranslatePage = () => {
   const [selectedDocs, setSelectedDocs] = useState(new Set());
   const [docsLoading, setDocsLoading] = useState(false);
   const [docsError, setDocsError] = useState(null);
+
+  // "All content types" mode: per-type counts and the chosen types.
+  const [coverage, setCoverage] = useState([]);
+  const [coverageLoading, setCoverageLoading] = useState(false);
+  const [coverageError, setCoverageError] = useState(null);
+  const [selectedUids, setSelectedUids] = useState(null);
+  const [onlyMissing, setOnlyMissing] = useState(true);
 
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -118,7 +131,7 @@ const BulkTranslatePage = () => {
   // truncated; bails at DOCS_HARD_CAP to keep the picker responsive on
   // very large collections (surfaces a "truncated" banner in that case).
   useEffect(() => {
-    if (!selectedUid || !sourceLocale) {
+    if (!selectedUid || selectedUid === ALL_CONTENT || !sourceLocale) {
       setDocuments([]);
       setSelectedDocs(new Set());
       setDocsError(null);
@@ -170,6 +183,50 @@ const BulkTranslatePage = () => {
     };
   }, [selectedUid, sourceLocale, post]);
 
+  // "All content types" mode: count source documents and the ones still
+  // missing in each target locale. Refreshed when a job finishes so the
+  // counts reflect what was just translated.
+  const allMode = selectedUid === ALL_CONTENT;
+  const jobFinished = !!job && TERMINAL_JOB_STATES.has(job.state);
+  const targetKey = targetLocales.join(",");
+  useEffect(() => {
+    if (!allMode || !sourceLocale) {
+      setCoverage([]);
+      setCoverageError(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setCoverageLoading(true);
+    setCoverageError(null);
+    post("/translate/bulk/locale/coverage", {
+      sourceLocale,
+      targetLocales: targetKey ? targetKey.split(",") : [],
+    })
+      .then((res) => {
+        if (cancelled) return;
+        const list = res.data?.contentTypes || [];
+        setCoverage(list);
+        setSelectedUids(
+          (cur) => cur || new Set(list.map((c) => c.uid))
+        );
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setCoverage([]);
+        setCoverageError(
+          err?.response?.data?.error?.message ||
+            err?.message ||
+            "Failed to load content types"
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setCoverageLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [allMode, sourceLocale, targetKey, jobFinished, post]);
+
   // Poll job state while bulk job is running. Use a ref to read terminal
   // status without putting `job` in the dep array — otherwise every setJob
   // would tear down the interval and immediately re-fire tick(), turning a
@@ -220,11 +277,31 @@ const BulkTranslatePage = () => {
 
   const selectedDoc = contentTypes.find((c) => c.uid === selectedUid);
 
-  const totalUnits = selectedDocs.size * targetLocales.length;
+  const chosenUids = selectedUids || new Set();
+  const unitsFor = (c) =>
+    targetLocales.reduce(
+      (sum, l) => sum + (onlyMissing ? c.missing?.[l] ?? 0 : c.sourceCount),
+      0
+    );
+  const totalUnits = allMode
+    ? coverage
+        .filter((c) => chosenUids.has(c.uid))
+        .reduce((sum, c) => sum + unitsFor(c), 0)
+    : selectedDocs.size * targetLocales.length;
 
   const startBulk = async () => {
     if (!selectedUid) return;
-    if (selectedDocs.size === 0) {
+    if (allMode && chosenUids.size === 0) {
+      toggleNotification({
+        type: "warning",
+        message: formatMessage({
+          id: tid("bulk.toast.pickTypes"),
+          defaultMessage: "Pick at least one content type.",
+        }),
+      });
+      return;
+    }
+    if (!allMode && selectedDocs.size === 0) {
       toggleNotification({
         type: "warning",
         message: formatMessage({
@@ -248,12 +325,21 @@ const BulkTranslatePage = () => {
     setJob(null);
     setJobId(null);
     try {
-      const res = await post("/translate/bulk", {
-        uid: selectedUid,
-        documentIds: [...selectedDocs],
-        sourceLocale,
-        targetLocales,
-      });
+      const res = allMode
+        ? await post("/translate/bulk/locale", {
+            sourceLocale,
+            targetLocales,
+            uids: coverage
+              .map((c) => c.uid)
+              .filter((uid) => chosenUids.has(uid)),
+            onlyMissing,
+          })
+        : await post("/translate/bulk", {
+            uid: selectedUid,
+            documentIds: [...selectedDocs],
+            sourceLocale,
+            targetLocales,
+          });
       setJobId(res.data.jobId);
     } catch (err) {
       toggleNotification({
@@ -320,7 +406,7 @@ const BulkTranslatePage = () => {
         subtitle={formatMessage({
           id: tid("bulk.header.subtitle"),
           defaultMessage:
-            "Translate every document of one content type into one or many target locales.",
+            "Translate every document of one content type, or all content at once, into one or many target locales.",
         })}
       />
       <Layouts.Content>
@@ -356,12 +442,27 @@ const BulkTranslatePage = () => {
                   })}
                   disabled={inflight}
                 >
+                  <SingleSelectOption value={ALL_CONTENT}>
+                    {formatMessage({
+                      id: tid("bulk.contentType.all"),
+                      defaultMessage: "All content types",
+                    })}
+                  </SingleSelectOption>
                   {contentTypes.map((c) => (
                     <SingleSelectOption key={c.uid} value={c.uid}>
                       {c.displayName} ({c.uid})
                     </SingleSelectOption>
                   ))}
                 </SingleSelect>
+                {allMode && (
+                  <Field.Hint>
+                    {formatMessage({
+                      id: tid("bulk.contentType.allHint"),
+                      defaultMessage:
+                        "Translates all your content, e.g. to fill a newly added language. Linked content types go first, so links point to the new translations.",
+                    })}
+                  </Field.Hint>
+                )}
                 {selectedDoc && (
                   <Field.Hint>
                     {formatMessage(
@@ -430,7 +531,203 @@ const BulkTranslatePage = () => {
             </Flex>
           </Box>
 
-          {selectedUid && (
+          {allMode && (
+            <Box
+              background="neutral0"
+              padding={6}
+              shadow="filterShadow"
+              hasRadius
+              borderColor="neutral150"
+            >
+              <Flex direction="column" alignItems="stretch" gap={4}>
+                <Flex justifyContent="space-between" alignItems="center">
+                  <Typography variant="delta" tag="h2">
+                    {formatMessage({
+                      id: tid("bulk.types.title"),
+                      defaultMessage: "Content types",
+                    })}
+                  </Typography>
+                  <Flex gap={2}>
+                    <Button
+                      variant="tertiary"
+                      size="S"
+                      onClick={() =>
+                        setSelectedUids(new Set(coverage.map((c) => c.uid)))
+                      }
+                      disabled={inflight || !coverage.length}
+                    >
+                      {formatMessage({
+                        id: tid("bulk.docs.selectAll"),
+                        defaultMessage: "Select all",
+                      })}
+                    </Button>
+                    <Button
+                      variant="tertiary"
+                      size="S"
+                      onClick={() => setSelectedUids(new Set())}
+                      disabled={inflight || !chosenUids.size}
+                    >
+                      {formatMessage({
+                        id: tid("bulk.docs.clear"),
+                        defaultMessage: "Clear",
+                      })}
+                    </Button>
+                  </Flex>
+                </Flex>
+                <Flex direction="column" alignItems="flex-start" gap={1}>
+                  <Checkbox
+                    checked={onlyMissing}
+                    onCheckedChange={(v) => setOnlyMissing(!!v)}
+                    disabled={inflight}
+                  >
+                    {formatMessage({
+                      id: tid("bulk.types.onlyMissing"),
+                      defaultMessage:
+                        "Only translate content that is missing in the target locale(s)",
+                    })}
+                  </Checkbox>
+                  <Typography variant="pi" textColor="neutral600">
+                    {formatMessage({
+                      id: tid("bulk.types.onlyMissing.hint"),
+                      defaultMessage:
+                        "Leaves existing translations untouched. Turn off to translate everything again and overwrite them.",
+                    })}
+                  </Typography>
+                </Flex>
+                {coverageLoading && !coverage.length ? (
+                  <Typography variant="pi" textColor="neutral500">
+                    {formatMessage({
+                      id: tid("bulk.types.loading"),
+                      defaultMessage: "Counting content…",
+                    })}
+                  </Typography>
+                ) : coverageError ? (
+                  <Alert
+                    variant="danger"
+                    title={formatMessage({
+                      id: tid("bulk.types.errorTitle"),
+                      defaultMessage: "Could not count content",
+                    })}
+                    closeLabel=""
+                  >
+                    {coverageError}
+                  </Alert>
+                ) : coverage.length === 0 ? (
+                  <Typography variant="pi" textColor="neutral500">
+                    {formatMessage({
+                      id: tid("bulk.types.empty"),
+                      defaultMessage:
+                        "No content types you can translate were found.",
+                    })}
+                  </Typography>
+                ) : (
+                  <Box style={{ maxHeight: 400, overflowY: "auto" }}>
+                    <Flex direction="column" alignItems="stretch" gap={1}>
+                      {coverage.map((c) => {
+                        const checked = chosenUids.has(c.uid);
+                        return (
+                          <Flex
+                            key={c.uid}
+                            gap={2}
+                            alignItems="center"
+                            padding={2}
+                            background={checked ? "primary100" : "neutral0"}
+                            hasRadius
+                            borderColor={checked ? "primary200" : "neutral200"}
+                            borderWidth="1px"
+                            borderStyle="solid"
+                          >
+                            <Checkbox
+                              aria-label={c.displayName}
+                              checked={checked}
+                              onCheckedChange={(v) => {
+                                setSelectedUids((cur) => {
+                                  const next = new Set(cur || []);
+                                  if (v) next.add(c.uid);
+                                  else next.delete(c.uid);
+                                  return next;
+                                });
+                              }}
+                              disabled={inflight}
+                            />
+                            <Box flex="1">
+                              <Typography variant="omega" tag="div">
+                                {c.displayName}
+                              </Typography>
+                              <Typography
+                                variant="pi"
+                                textColor="neutral500"
+                                tag="div"
+                              >
+                                {c.uid}
+                              </Typography>
+                            </Box>
+                            <Flex
+                              direction="column"
+                              alignItems="flex-end"
+                              gap={1}
+                            >
+                              <Typography variant="pi" textColor="neutral600">
+                                {formatMessage(
+                                  {
+                                    id: tid("bulk.types.sourceCount"),
+                                    defaultMessage:
+                                      "{count} in {locale}",
+                                  },
+                                  {
+                                    count: c.sourceCount,
+                                    locale: localeName(sourceLocale),
+                                  }
+                                )}
+                              </Typography>
+                              {targetLocales.map((l) => (
+                                <Typography
+                                  key={l}
+                                  variant="pi"
+                                  textColor={
+                                    c.missing?.[l] ? "warning700" : "success600"
+                                  }
+                                >
+                                  {formatMessage(
+                                    {
+                                      id: tid("bulk.types.missing"),
+                                      defaultMessage:
+                                        "{locale}: {count} missing",
+                                    },
+                                    {
+                                      locale: localeName(l),
+                                      count: c.missing?.[l] ?? 0,
+                                    }
+                                  )}
+                                </Typography>
+                              ))}
+                            </Flex>
+                          </Flex>
+                        );
+                      })}
+                    </Flex>
+                  </Box>
+                )}
+                <Typography variant="pi" textColor="neutral600">
+                  {formatMessage(
+                    {
+                      id: tid("bulk.types.summary"),
+                      defaultMessage:
+                        "{selected} of {total} content types selected — {units} translation(s) will run.",
+                    },
+                    {
+                      selected: coverage.filter((c) => chosenUids.has(c.uid))
+                        .length,
+                      total: coverage.length,
+                      units: totalUnits,
+                    }
+                  )}
+                </Typography>
+              </Flex>
+            </Box>
+          )}
+
+          {selectedUid && !allMode && (
             <Box
               background="neutral0"
               padding={6}
@@ -676,8 +973,9 @@ const BulkTranslatePage = () => {
               disabled={
                 starting ||
                 !selectedUid ||
-                selectedDocs.size === 0 ||
-                targetLocales.length === 0
+                (allMode ? coverageLoading : selectedDocs.size === 0) ||
+                targetLocales.length === 0 ||
+                totalUnits === 0
               }
             >
               {formatMessage(

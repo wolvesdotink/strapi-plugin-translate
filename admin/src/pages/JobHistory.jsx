@@ -274,7 +274,15 @@ const JobHistoryPage = () => {
                       </Td>
                       <Td>
                         <Typography variant="omega" ellipsis>
-                          {job.uid || "—"}
+                          {job.uids?.length > 1
+                            ? formatMessage(
+                                {
+                                  id: tid("jobs.allContent"),
+                                  defaultMessage: "{count} content types",
+                                },
+                                { count: job.uids.length }
+                              )
+                            : job.uid || "—"}
                         </Typography>
                         {job.documentId && (
                           <Typography variant="pi" textColor="neutral500">
@@ -284,7 +292,7 @@ const JobHistoryPage = () => {
                       </Td>
                       <Td>
                         <Flex gap={1} wrap="wrap">
-                          {targets.length === 0 && (
+                          {!job.targets?.length && (
                             <Typography variant="pi" textColor="neutral500">
                               —
                             </Typography>

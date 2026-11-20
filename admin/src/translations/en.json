@@ -129,7 +129,7 @@
   "bulk.menu": "Bulk translate",
   "bulk.title": "Bulk translate",
   "bulk.header.title": "Bulk translate",
-  "bulk.header.subtitle": "Translate every document of one content type into one or many target locales.",
+  "bulk.header.subtitle": "Translate every document of one content type, or all content at once, into one or many target locales.",
   "bulk.scope.title": "Scope",
   "bulk.contentType": "Content type",
   "bulk.contentType.placeholder": "Select a content type",
@@ -276,5 +276,18 @@
   "changes.pendingCount": "{count, plural, one {# change} other {# changes}}",
   "changes.open": "Open {language}",
   "changes.allUpToDate": "All languages are up to date.",
-  "changes.introMissing": "Every existing language is up to date. Pick the missing languages to create this entry in. You review every translation before anything is saved."
+  "changes.introMissing": "Every existing language is up to date. Pick the missing languages to create this entry in. You review every translation before anything is saved.",
+  "bulk.contentType.all": "All content types",
+  "bulk.contentType.allHint": "Translates all your content, e.g. to fill a newly added language. Linked content types go first, so links point to the new translations.",
+  "bulk.types.title": "Content types",
+  "bulk.types.onlyMissing": "Only translate content that is missing in the target locale(s)",
+  "bulk.types.onlyMissing.hint": "Leaves existing translations untouched. Turn off to translate everything again and overwrite them.",
+  "bulk.types.loading": "Counting content…",
+  "bulk.types.errorTitle": "Could not count content",
+  "bulk.types.empty": "No content types you can translate were found.",
+  "bulk.types.sourceCount": "{count} in {locale}",
+  "bulk.types.missing": "{locale}: {count} missing",
+  "bulk.types.summary": "{selected} of {total} content types selected — {units} translation(s) will run.",
+  "bulk.toast.pickTypes": "Pick at least one content type.",
+  "jobs.allContent": "{count} content types"
 }

@@ -73,6 +73,21 @@ export default [
     handler: "translate.bulkTranslate",
     config: { policies: contentPermissions() },
   },
+  // Bulk translation across every content type into a locale (e.g. a newly
+  // added language). These target many uids, so the controller filters the
+  // content types by read + update permission itself instead of a policy.
+  {
+    method: "POST",
+    path: "/bulk/locale/coverage",
+    handler: "translate.localeCoverage",
+    config: { policies: authedOnly() },
+  },
+  {
+    method: "POST",
+    path: "/bulk/locale",
+    handler: "translate.bulkTranslateLocale",
+    config: { policies: authedOnly() },
+  },
   {
     method: "GET",
     path: "/jobs",

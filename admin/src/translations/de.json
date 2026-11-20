@@ -129,7 +129,7 @@
   "bulk.menu": "Massenübersetzung",
   "bulk.title": "Massenübersetzung",
   "bulk.header.title": "Massenübersetzung",
-  "bulk.header.subtitle": "Übersetze alle Dokumente eines Inhaltstyps in eine oder mehrere Zielsprachen.",
+  "bulk.header.subtitle": "Alle Dokumente eines Inhaltstyps oder alle Inhalte auf einmal in eine oder mehrere Zielsprachen übersetzen.",
   "bulk.scope.title": "Umfang",
   "bulk.contentType": "Inhaltstyp",
   "bulk.contentType.placeholder": "Inhaltstyp wählen",
@@ -276,5 +276,18 @@
   "changes.pendingCount": "{count, plural, one {# Änderung} other {# Änderungen}}",
   "changes.open": "{language} öffnen",
   "changes.allUpToDate": "Alle Sprachen sind aktuell.",
-  "changes.introMissing": "Alle vorhandenen Sprachen sind aktuell. Wähle die fehlenden Sprachen, in denen dieser Eintrag angelegt werden soll. Du prüfst jede Übersetzung, bevor etwas gespeichert wird."
+  "changes.introMissing": "Alle vorhandenen Sprachen sind aktuell. Wähle die fehlenden Sprachen, in denen dieser Eintrag angelegt werden soll. Du prüfst jede Übersetzung, bevor etwas gespeichert wird.",
+  "bulk.contentType.all": "Alle Inhaltstypen",
+  "bulk.contentType.allHint": "Übersetzt alle Inhalte, z. B. um eine neu hinzugefügte Sprache zu füllen. Verknüpfte Inhaltstypen kommen zuerst, damit Verknüpfungen auf die neuen Übersetzungen zeigen.",
+  "bulk.types.title": "Inhaltstypen",
+  "bulk.types.onlyMissing": "Nur Inhalte übersetzen, die in der Zielsprache noch fehlen",
+  "bulk.types.onlyMissing.hint": "Bestehende Übersetzungen bleiben unverändert. Deaktivieren, um alles neu zu übersetzen und zu überschreiben.",
+  "bulk.types.loading": "Inhalte werden gezählt…",
+  "bulk.types.errorTitle": "Inhalte konnten nicht gezählt werden",
+  "bulk.types.empty": "Keine übersetzbaren Inhaltstypen gefunden.",
+  "bulk.types.sourceCount": "{count} auf {locale}",
+  "bulk.types.missing": "{locale}: {count} fehlen",
+  "bulk.types.summary": "{selected} von {total} Inhaltstypen ausgewählt — {units} Übersetzung(en) werden ausgeführt.",
+  "bulk.toast.pickTypes": "Mindestens einen Inhaltstyp auswählen.",
+  "jobs.allContent": "{count} Inhaltstypen"
 }
