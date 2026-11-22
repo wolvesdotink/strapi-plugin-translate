@@ -493,7 +493,7 @@ const BulkTranslatePage = () => {
                     >
                       {allLocales.map((l) => (
                         <SingleSelectOption key={l.code} value={l.code}>
-                          {l.name} ({l.code})
+                          {l.name}
                         </SingleSelectOption>
                       ))}
                     </SingleSelect>
@@ -521,7 +521,7 @@ const BulkTranslatePage = () => {
                     >
                       {targetLocaleOptions.map((l) => (
                         <MultiSelectOption key={l.code} value={l.code}>
-                          {l.name} ({l.code})
+                          {l.name}
                         </MultiSelectOption>
                       ))}
                     </MultiSelect>

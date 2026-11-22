@@ -1037,7 +1037,7 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
               >
                 {targetLocales.map((l) => (
                   <MultiSelectOption key={l.code} value={l.code}>
-                    {l.name} ({l.code})
+                    {l.name}
                   </MultiSelectOption>
                 ))}
               </MultiSelect>
