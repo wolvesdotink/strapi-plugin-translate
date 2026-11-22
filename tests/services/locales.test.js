@@ -24,10 +24,14 @@ const makeStrapi = (i18nLocales, opts = {}) => {
         return {
           service: (name) => {
             if (name !== "locales") throw new Error("unexpected");
-            return { find: async () => i18nLocales };
+            return {
+              find: async () => i18nLocales,
+              getDefaultLocale: async () => opts.defaultLocale,
+            };
           },
         };
       }
+      if (id === "translate") return { config: { sourceLocale: opts.sourceLocale } };
       return {};
     },
     _warnings: warnings,
@@ -45,6 +49,35 @@ describe("locales service", () => {
     expect(snap.fallback).toBe(false);
     expect(snap.list).toHaveLength(2);
     expect([...snap.codes]).toEqual(["de", "en"]);
+  });
+
+  // i18n's find() returns raw rows; the default lives in the core store.
+  it("marks the i18n default locale as default", async () => {
+    const strapi = makeStrapi(
+      [
+        { code: "en", name: "English" },
+        { code: "de", name: "German" },
+      ],
+      { defaultLocale: "de", sourceLocale: "en" }
+    );
+    const svc = localesFactory({ strapi });
+    expect(await svc.list()).toEqual([
+      { code: "en", name: "English", isDefault: false },
+      { code: "de", name: "German", isDefault: true },
+    ]);
+  });
+
+  it("falls back to settings.sourceLocale when i18n has no usable default", async () => {
+    const strapi = makeStrapi(
+      [
+        { code: "en", name: "English" },
+        { code: "de", name: "German" },
+      ],
+      { defaultLocale: "fr", sourceLocale: "de" }
+    );
+    const svc = localesFactory({ strapi });
+    const defaults = (await svc.list()).filter((l) => l.isDefault);
+    expect(defaults.map((l) => l.code)).toEqual(["de"]);
   });
 
   it("memoizes within the TTL window", async () => {

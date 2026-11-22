@@ -45,15 +45,20 @@ export default ({ strapi }) => {
         };
       }
       const list = await service.find();
-      const cleaned = Array.isArray(list)
-        ? list
-            .filter((l) => l && typeof l.code === "string" && l.code)
-            .map((l) => ({
-              code: l.code,
-              name: l.name || l.code,
-              isDefault: !!l.isDefault,
-            }))
+      const rows = Array.isArray(list)
+        ? list.filter((l) => l && typeof l.code === "string" && l.code)
         : [];
+      // find() returns raw rows without isDefault; i18n keeps the default in
+      // its core store. settings.sourceLocale covers a missing or stale one.
+      const defaultCode = [
+        await service.getDefaultLocale?.(),
+        strapi.plugin("translate")?.config?.sourceLocale,
+      ].find((code) => rows.some((l) => l.code === code));
+      const cleaned = rows.map((l) => ({
+        code: l.code,
+        name: l.name || l.code,
+        isDefault: l.code === defaultCode,
+      }));
       if (cleaned.length === 0) {
         strapi.log?.warn?.(
           "[translate] i18n returned no locales; falling back to static list"
