@@ -477,7 +477,11 @@ const BulkTranslatePage = () => {
                 )}
               </Field.Root>
 
-              <Flex gap={4} alignItems="flex-start">
+              <Flex
+                gap={4}
+                direction={{ initial: "column", large: "row" }}
+                alignItems={{ initial: "stretch", large: "flex-start" }}
+              >
                 <Box flex="1">
                   <Field.Root name="source-locale">
                     <Field.Label>
