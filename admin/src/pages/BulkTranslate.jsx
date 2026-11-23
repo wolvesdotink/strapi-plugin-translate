@@ -836,8 +836,14 @@ const BulkTranslatePage = () => {
                             disabled={inflight}
                           />
                           <Box flex="1">
-                            <Typography variant="omega">{d.label}</Typography>
-                            <Typography variant="pi" textColor="neutral500">
+                            <Typography variant="omega" tag="div">
+                              {d.label}
+                            </Typography>
+                            <Typography
+                              variant="pi"
+                              textColor="neutral500"
+                              tag="div"
+                            >
                               {d.documentId}
                             </Typography>
                           </Box>

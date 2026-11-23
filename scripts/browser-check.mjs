@@ -388,9 +388,17 @@ try {
   const targetBox = await page.locator('[name="target-locales"]').boundingBox();
   assert.ok(targetBox.y >= sourceBox.y + sourceBox.height);
   assert.equal(targetBox.width, sourceBox.width);
+  // Each document row shows its documentId on its own line below the label.
+  await page.locator('[name="content-type"]').click();
+  await page.getByRole("option", { name: "Page (api::page.page)" }).click();
+  const docLabel = page.getByText("Travel guide", { exact: true });
+  await docLabel.waitFor();
+  const labelBox = await docLabel.boundingBox();
+  const idBox = await page.getByText(documentId, { exact: true }).boundingBox();
+  assert.ok(idBox.y >= labelBox.y + labelBox.height);
   assert.deepEqual(errors, []);
   console.log(
-    "PASS real admin saves, desktop/mobile previews, two-language acceptance, parent/child optional-link approvals, preserved manual copy, new-entry prompts, and the Bulk translate phone layout.",
+    "PASS real admin saves, desktop/mobile previews, two-language acceptance, parent/child optional-link approvals, preserved manual copy, new-entry prompts, the Bulk translate phone layout, and Bulk translate document rows.",
   );
 } catch (error) {
   await page
