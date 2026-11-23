@@ -380,9 +380,17 @@ try {
     await page.getByRole("checkbox", { name: /^French/ }).isDisabled(),
     false,
   );
+  // On a phone, Bulk translate stacks the locale fields instead of squeezing them side by side.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${base}/admin/settings/translate/bulk`);
+  await page.locator('[name="source-locale"]').waitFor();
+  const sourceBox = await page.locator('[name="source-locale"]').boundingBox();
+  const targetBox = await page.locator('[name="target-locales"]').boundingBox();
+  assert.ok(targetBox.y >= sourceBox.y + sourceBox.height);
+  assert.equal(targetBox.width, sourceBox.width);
   assert.deepEqual(errors, []);
   console.log(
-    "PASS real admin saves, desktop/mobile previews, two-language acceptance, parent/child optional-link approvals, preserved manual copy, and new-entry prompts.",
+    "PASS real admin saves, desktop/mobile previews, two-language acceptance, parent/child optional-link approvals, preserved manual copy, new-entry prompts, and the Bulk translate phone layout.",
   );
 } catch (error) {
   await page
