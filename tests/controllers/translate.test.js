@@ -104,6 +104,51 @@ const makeStrapi = ({
   };
 };
 
+describe("linked creation relation permissions", () => {
+  it.each(["published-only", "inherited-document-id"])("checks the attached row for %s relations", async scenario => {
+    const uid = "api::child.child", target = "api::related.related";
+    let authorize;
+    const strapi = makeStrapi({
+      models: {
+        [uid]: { options: { draftAndPublish: scenario !== "published-only" }, attributes: {
+          related: { type: "relation", target },
+        } },
+        [target]: { options: { draftAndPublish: true } },
+      },
+      translateService: { async translateDocument(args) {
+        authorize = args.authorizeLinkedItem;
+        return { entry: { documentId: "child", locale: "en" } };
+      } },
+      documentsByUid: { [target]: { async findOne({ locale, status }) {
+        if (locale !== "en") return { allowed: true };
+        if (scenario === "published-only" && status === "draft") return null;
+        return { allowed: false };
+      } } },
+    });
+    const jobs = jobsFactory({ strapi: { ...strapi, plugin: () => ({ config: { persistJobs: false } }) } });
+    const originalPlugin = strapi.plugin;
+    strapi.plugin = name => name === "content-manager" ? {
+      service: () => ({ create: () => ({
+        cannot: { read: entry => entry.allowed === false, create: () => false },
+        sanitizeCreateInput: async data => data,
+      }) }),
+    } : { ...originalPlugin(name), service: service => service === "jobs" ? jobs : originalPlugin(name).service(service) };
+    strapi.db = { query: model => ({ async findOne() {
+      return model === target ? { allowed: true } : { allowed: true, related: { id: 10, documentId: "related" } };
+    } }) };
+    strapi.localization = {
+      getNestedPopulateOfNonLocalizedAttributes: () => ({}),
+      fillNonLocalizedAttributes: (data, source) => { data.related ??= source.related; },
+    };
+    await controllerFactory({ strapi }).translateDocument(makeCtx({ body: {
+      uid, documentId: "child", sourceLocale: "de", targetLocale: "en", createMissingRelations: true,
+    } }));
+    await expect(authorize({ uid, documentId: "child", source: {}, targetLocale: "en",
+      proposed: scenario === "published-only" ? { related: ["related"] } : {},
+    })).rejects.toMatchObject({ status: 403 });
+  });
+});
+
 describe("scoped preview job access", () => {
   it("keeps staged field values private to the editor who generated them", async () => {
     const jobs = { get: () => ({ id:"job",uid:"api::page.page",source:"preview",userId:2,targets:[{result:{modules:[{fields:[{after:"Private translation"}]}]}}] }) };

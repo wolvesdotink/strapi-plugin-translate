@@ -57,7 +57,7 @@
   "summary.allDoneBody": "Pick a locale below to open its translated entry.",
   "summary.allDoneWithWarnings": "Translated to {count} locale(s) with warnings",
   "summary.warningsCount": "{count} skipped",
-  "summary.warningsIntro": "{count} reference(s) across the translated entries point at records that no longer exist. They were left empty — please review and re-link them manually.",
+  "summary.warningsIntro": "{count} reference(s) are unavailable in the target language. They were left empty. You can translate again with “Create missing linked translations” enabled, or review and re-link them manually.",
   "summary.partial": "Translated {done} of {total} locales",
   "summary.partialBody": "Some locales failed — see the list below for details.",
   "summary.failed": "Translation failed",
@@ -289,5 +289,7 @@
   "bulk.types.missing": "{locale}: {count} missing",
   "bulk.types.summary": "{selected} of {total} content types selected — {units} translation(s) will run.",
   "bulk.toast.pickTypes": "Pick at least one content type.",
-  "jobs.allContent": "{count} content types"
+  "jobs.allContent": "{count} content types",
+  "dialog.createMissingRelations": "Create missing linked translations",
+  "dialog.createMissingRelationsHint": "Create missing language versions of directly linked items. Existing translations are kept. Additional costs are not included in the estimate. Turn off preview to use this option, or use “Also translate linked items” in the changes review."
 }

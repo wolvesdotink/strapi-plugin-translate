@@ -57,7 +57,7 @@
   "summary.allDoneBody": "Wähle unten eine Sprache, um den übersetzten Eintrag zu öffnen.",
   "summary.allDoneWithWarnings": "In {count} Sprache(n) mit Warnungen übersetzt",
   "summary.warningsCount": "{count} übersprungen",
-  "summary.warningsIntro": "{count} Referenz(en) in den übersetzten Einträgen verweisen auf nicht mehr vorhandene Datensätze. Sie wurden leer gelassen — bitte prüfen und manuell neu verknüpfen.",
+  "summary.warningsIntro": "{count} Referenz(en) sind in der Zielsprache nicht verfügbar und wurden leer gelassen. Übersetze erneut mit „Fehlende Übersetzungen verknüpfter Einträge erstellen“ oder prüfe und ergänze die Verknüpfungen manuell.",
   "summary.partial": "{done} von {total} Sprachen übersetzt",
   "summary.partialBody": "Einige Sprachen sind fehlgeschlagen — Details siehe Liste unten.",
   "summary.failed": "Übersetzung fehlgeschlagen",
@@ -289,5 +289,7 @@
   "bulk.types.missing": "{locale}: {count} fehlen",
   "bulk.types.summary": "{selected} von {total} Inhaltstypen ausgewählt — {units} Übersetzung(en) werden ausgeführt.",
   "bulk.toast.pickTypes": "Mindestens einen Inhaltstyp auswählen.",
-  "jobs.allContent": "{count} Inhaltstypen"
+  "jobs.allContent": "{count} Inhaltstypen",
+  "dialog.createMissingRelations": "Fehlende Übersetzungen verknüpfter Einträge erstellen",
+  "dialog.createMissingRelationsHint": "Fehlende Sprachversionen direkt verknüpfter Einträge erstellen. Vorhandene Übersetzungen bleiben erhalten. Zusätzliche Kosten sind nicht in der Schätzung enthalten. Vorschau dafür ausschalten oder „Verknüpfte Einträge ebenfalls übersetzen“ in der Änderungsprüfung nutzen."
 }

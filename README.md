@@ -281,6 +281,8 @@ Relations marked `copy` in affected modules are checked for the same `documentId
 
 By default, article content is preserved and the existing localized item is linked. **Also translate linked items** adds separate previews for changed direct children and missing localized versions. Child translations are applied before the parent link, in the same transaction for that language. Only changed child fields are translated when a baseline exists. The first release limits propagation to direct children, deduplicates repeated links, and avoids recursive graph translation.
 
+The full-document **Translate** dialog also offers **Create missing linked translations** when preview is off. This creates missing target-language versions of directly linked items and saves them together with the page, subject to the editor's read and create permissions. Existing linked translations are preserved. It uses the same `selectiveTranslation.maxLinkedItems` limit (20 by default), does not recursively translate further links, and adds provider costs beyond the page estimate. To review linked translations before saving, use **Also translate linked items** in the changes review instead. Items are saved as drafts where Draft & Publish is enabled; otherwise they are live.
+
 Missing optional localized items can be omitted with explicit review, or created using the linked-item option. Each linked-item preview has its own omission approval for its optional missing links; approving the page's omissions does not approve its children's omissions. Unresolved required relations block acceptance. Draft-only localized items are flagged in the preview; applying a page draft does not publish its articles.
 
 ### Review and persistence
