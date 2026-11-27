@@ -28,6 +28,10 @@ hero.attributes.translationKey = {
   pluginOptions: { translate: { translate: "copy" } },
 };
 await fs.writeFile(heroPath, JSON.stringify(hero));
+const articleSchemaPath = `${dir}/src/api/article/content-types/article/schema.json`;
+const articleSchema = JSON.parse(await fs.readFile(articleSchemaPath));
+articleSchema.attributes.sharedSecret = { type: "string", pluginOptions: { translate: { translate: "skip" } } };
+await fs.writeFile(articleSchemaPath, JSON.stringify(articleSchema));
 process.env.STRAPI_TELEMETRY_DISABLED = "true";
 const app = await loadFixture(dir);
 const svc = (name) => app.plugin("translate").service(name);
@@ -82,6 +86,62 @@ const stage = async (body, userAbility) => {
   throw new Error(`Preview job timed out: ${ctx.body.jobId}`);
 };
 try {
+  {
+    const linkedUid = "api::article.article";
+    const linked = await app.documents(linkedUid).create({
+      locale: "de", data: { title: "Verknüpft" },
+    });
+    const page = await app.documents(uid).create({
+      locale: "de", data: { title: "Mit Verknüpfung", modules: [{
+        __component: "blocks.featured", title: "Artikel", articles: [linked.documentId],
+      }] },
+    });
+    let unreadableGrandchild;
+    const runFull = async (createLocales, articleFields = ["title", "body", "related"]) => {
+      const rules = permissions(["de", "en", "fr"], createLocales).map(rule =>
+        rule.subject === linkedUid
+          ? { ...rule, properties: { ...rule.properties, fields: articleFields } }
+          : rule);
+      const userAbility = await app.service("admin::permission").engine.generateTokenAbility(rules, { roles: [] });
+      if (unreadableGrandchild) userAbility.update([...userAbility.rules, {
+        action: "plugin::content-manager.explorer.read", subject: linkedUid,
+        inverted: true, conditions: { documentId: unreadableGrandchild.documentId },
+      }]);
+      const ctx = ctxFor({
+        uid, documentId: page.documentId, sourceLocale: "de",
+        targetLocales: ["fr"], createMissingRelations: true,
+      }, userAbility);
+      await controller.translateDocument(ctx);
+      for (let i = 0; i < 100; i++) {
+        const job = svc("jobs").get(ctx.body.jobId);
+        if (["done", "failed"].includes(job.state)) return job;
+        await new Promise(r => setTimeout(r, 50));
+      }
+      throw new Error("Full translation timed out");
+    };
+    // Empty localized body is not read or written by the translator.
+    const emptyBody = await runFull(["fr"], ["title", "related"]);
+    assert.equal(emptyBody.state, "done", JSON.stringify(emptyBody));
+    await app.documents(linkedUid).delete({ documentId: linked.documentId, locale: "fr" });
+    await app.documents(uid).delete({ documentId: page.documentId, locale: "fr" });
+    await app.documents(linkedUid).update({ documentId: linked.documentId, locale: "de", data: { body: "Inhalt", sharedSecret: "Restricted shared value" } });
+    assert.equal((await runFull(["en"])).state, "failed");
+    assert.equal((await runFull(["en", "fr"], ["title"])).state, "failed");
+    assert.equal(await svc("changes").load(linkedUid, linked.documentId, "fr"), null);
+    // Strapi copies this skipped, non-localized value; it still needs permission.
+    assert.equal((await runFull(["fr"])).state, "failed");
+    assert.equal(await svc("changes").load(linkedUid, linked.documentId, "fr"), null);
+    unreadableGrandchild = await app.documents(linkedUid).create({ locale: "de", data: { title: "Unreadable grandchild" } });
+    await app.documents(linkedUid).update({ documentId: linked.documentId, locale: "de", data: {
+      sharedSecret: null, related: [unreadableGrandchild.documentId],
+    } });
+    const allowedJob = await runFull(["en", "fr"]);
+    assert.equal(allowedJob.state, "done", JSON.stringify(allowedJob));
+    const saved = await svc("changes").load(uid, page.documentId, "fr");
+    assert.equal(saved.modules[0].articles[0].documentId, linked.documentId);
+    assert.equal(saved.modules[0].articles[0].locale, "fr");
+    console.log("PASS full translation checks written and inherited fields, allows empty restricted fields, and omits missing unreadable grandchildren");
+  }
   const doc = await app.documents(uid).findFirst({ locale: "de" });
   const documentId = doc.documentId;
   await app

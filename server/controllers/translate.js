@@ -127,6 +127,83 @@ const authorizeChanges = (strapi, ctx) => {
   return authorize;
 };
 
+// Full translations do not display related titles or read omitted links.
+// Check the payload that will be saved, including Strapi's implicit copies.
+const authorizeLinkedCreation = (strapi, ctx) => async (prepared) => {
+  const checkerFor = model => strapi.plugin("content-manager")
+    .service("permission-checker").create({ userAbility: ctx.state.userAbility, model });
+  const checker = checkerFor(prepared.uid);
+  const deny = () => { throw Object.assign(new Error("Missing permission for a linked translation."), { status: 403 }); };
+  if (checker.cannot.read(prepared.source)) deny();
+  if (prepared.target) {
+    if (checker.cannot.read(prepared.target)) deny();
+    return;
+  }
+  const subject = { locale: prepared.targetLocale };
+  if (checker.cannot.create(subject)) deny();
+  if (!prepared.proposed) return;
+
+  const checkFields = async (model, data, source, prefix = []) => {
+    for (const [name, value] of Object.entries(data || {})) {
+      const attr = strapi.getModel(model)?.attributes?.[name];
+      if (!attr) continue;
+      const path = prefix.concat(name);
+      const field = permissionField(strapi, prepared.uid, path);
+      if (checker.cannot.read(source, field) || checker.cannot.create(subject, field)) deny();
+      if (value == null) continue;
+      if (attr.type === "component" || attr.type === "dynamiczone") {
+        for (const item of Array.isArray(value) ? value : [value]) {
+          await checkFields(attr.type === "dynamiczone" ? item.__component : attr.component, item, source, path);
+        }
+      } else if (attr.type === "relation") {
+        const relatedChecker = checkerFor(attr.target);
+        for (const ref of Array.isArray(value) ? value : [value]) {
+          if (ref == null) continue;
+          const id = typeof ref === "object" ? ref.id : typeof ref === "number" ? ref : null;
+          const documentId = typeof ref === "string" ? ref : ref.documentId;
+          // Document IDs take precedence over populated numeric IDs. Without
+          // draft/publish on the child, Strapi can attach both target versions.
+          if (documentId) {
+            const targetDP = strapi.getModel(attr.target)?.options?.draftAndPublish;
+            const sourceDP = strapi.getModel(prepared.uid)?.options?.draftAndPublish;
+            const statuses = !targetDP ? ["published"] : sourceDP ? ["draft"]
+              : ref.status ? [ref.status === "published" ? "published" : "draft"] : ["draft", "published"];
+            for (const status of statuses) {
+              const entry = await strapi.documents(attr.target).findOne({
+                documentId, locale: prepared.targetLocale, status,
+              });
+              if (entry && relatedChecker.cannot.read(entry)) deny();
+            }
+          } else if (id != null) {
+            const entry = await strapi.db.query(attr.target).findOne({ where: { id } });
+            if (entry && relatedChecker.cannot.read(entry)) deny();
+          }
+        }
+      }
+    }
+  };
+  await checkFields(prepared.uid, prepared.proposed, prepared.source);
+  const sanitized = await checker.sanitizeCreateInput(prepared.proposed);
+  if (fingerprint(sanitized) !== fingerprint(prepared.proposed)) deny();
+
+  // Match document-service copyNonLocalizedFields: prefer a published row,
+  // and fill only nil fields. Translation directives do not govern this copy.
+  const copiedSource = await strapi.db.query(prepared.uid).findOne({
+    where: { documentId: prepared.documentId }, orderBy: { publishedAt: "desc" },
+    populate: strapi.localization.getNestedPopulateOfNonLocalizedAttributes(prepared.uid),
+  });
+  if (copiedSource) {
+    const filled = structuredClone(prepared.proposed);
+    strapi.localization.fillNonLocalizedAttributes(filled, copiedSource, { model: prepared.uid });
+    const copied = Object.fromEntries(Object.entries(filled).filter(([name, value]) =>
+      prepared.proposed[name] == null && value != null));
+    if (Object.keys(copied).length) {
+      if (checker.cannot.read(copiedSource)) deny();
+      await checkFields(prepared.uid, copied, copiedSource);
+    }
+  }
+};
+
 // Populated linked items are sanitized with their own content type's
 // permissions; unreadable ones are dropped.
 const sanitizeLinks = async (strapi, ctx, uid, entry, depth = 0) => {
@@ -554,6 +631,9 @@ export default ({ strapi }) => {
     async translateDocument(ctx) {
       const body = ctx.request.body || {};
       const { uid, documentId, sourceLocale } = body;
+      if (body.createMissingRelations !== undefined && typeof body.createMissingRelations !== "boolean") {
+        return ctx.badRequest("createMissingRelations must be a boolean");
+      }
 
       // Normalise to an array. Accept either shape so old callers keep working.
       const rawTargets = Array.isArray(body.targetLocales)
@@ -631,6 +711,8 @@ export default ({ strapi }) => {
               sourceLocale,
               targetLocale: target.locale,
               actingUserId,
+              createMissingRelations: body.createMissingRelations === true,
+              authorizeLinkedItem: authorizeLinkedCreation(strapi, ctx),
               signal: job.signal,
               onProgress: ({ format, done, total }) => {
                 if (target.progress[format]) {

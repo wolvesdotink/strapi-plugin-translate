@@ -9,6 +9,164 @@ const app = await loadFixture(directory);
 const svc = (name) => app.plugin("translate").service(name);
 const uid = "api::page.page";
 try {
+  // A copied relation may exist in the source locale only. Strapi resolves
+  // document IDs in the destination locale when saving, including in DZs.
+  const linkedArticleUid = "api::article.article";
+  const missingLink = await app.documents(linkedArticleUid).create({
+    locale: "de", data: { title: "Nur auf Deutsch" },
+  });
+  const availableLink = await app.documents(linkedArticleUid).create({
+    locale: "de", data: { title: "Auch auf Englisch" },
+  });
+  await app.documents(linkedArticleUid).update({
+    documentId: availableLink.documentId, locale: "en",
+    data: { title: "Also in English" },
+  });
+  const relationPage = await app.documents(uid).create({
+    locale: "de",
+    data: {
+      title: "Verknüpfte Artikel",
+      modules: [{
+        __component: "blocks.featured", title: "Artikel",
+        articles: [missingLink.documentId, availableLink.documentId],
+      }],
+    },
+  });
+  for (const targetLocale of ["en", "fr"]) {
+    const result = await svc("translate").translateDocument({
+      uid, documentId: relationPage.documentId, sourceLocale: "de", targetLocale,
+    });
+    assert.deepEqual(result.warnings.map(w => w.id).sort(),
+      (targetLocale === "en"
+        ? [missingLink.documentId]
+        : [missingLink.documentId, availableLink.documentId]).sort());
+    const saved = await svc("changes").load(uid, relationPage.documentId, targetLocale);
+    assert.equal(saved.title, `[${targetLocale}] Verknüpfte Artikel`);
+    assert.deepEqual(saved.modules[0].articles.map(a => a.documentId),
+      targetLocale === "en" ? [availableLink.documentId] : []);
+  }
+  console.log("PASS full translation skips unavailable localized links and preserves available drafts");
+
+  const createLinkedArgs = {
+    uid, documentId: relationPage.documentId, sourceLocale: "de", targetLocale: "en",
+    createMissingRelations: true,
+  };
+  await assert.rejects(svc("translate").translateDocument({
+    ...createLinkedArgs,
+    authorizeLinkedItem: async () => { throw new Error("Creation denied"); },
+  }), /Creation denied/);
+  assert.equal(await app.documents(linkedArticleUid).findOne({
+    documentId: missingLink.documentId, locale: "en", status: "draft",
+  }), null);
+  // A skipped field can control document permissions without affecting the
+  // translation snapshot. Commit-time authorization must see its current value.
+  for (const concurrentTarget of [false, true]) {
+    const bodyOptions = app.getModel(linkedArticleUid).attributes.body.pluginOptions;
+    const previousDirective = bodyOptions.translate.translate;
+    bodyOptions.translate.translate = "skip";
+    let revoked = false;
+    try {
+      await assert.rejects(svc("translate").translateDocument({
+        ...createLinkedArgs,
+        authorizeLinkedItem: async p => {
+          if (p.source.body === "Access revoked") throw new Error("Read permission revoked");
+          if (p.proposed && !revoked) {
+            revoked = true;
+            if (concurrentTarget) await app.documents(linkedArticleUid).update({
+              documentId: missingLink.documentId, locale: "en", data: { title: "Concurrent target" },
+            });
+            await app.documents(linkedArticleUid).update({
+              documentId: missingLink.documentId, locale: "de", data: { body: "Access revoked" },
+            });
+          }
+        },
+      }), /Read permission revoked/);
+      assert.equal(!!(await app.documents(linkedArticleUid).findOne({
+        documentId: missingLink.documentId, locale: "en", status: "draft",
+      })), concurrentTarget);
+    } finally {
+      bodyOptions.translate.translate = previousDirective;
+      if (concurrentTarget) await app.documents(linkedArticleUid).delete({ documentId: missingLink.documentId, locale: "en" });
+      await app.documents(linkedArticleUid).update({
+        documentId: missingLink.documentId, locale: "de", data: { body: null },
+      });
+    }
+  }
+  // A parent without draft/publish can attach both child versions. Reusing
+  // a concurrent target must not authorize only its readable draft.
+  const pageOptions = app.getModel(uid).options;
+  const previousDP = pageOptions.draftAndPublish;
+  pageOptions.draftAndPublish = false;
+  let publishedConcurrently = false;
+  try {
+    await assert.rejects(svc("translate").translateDocument({
+      ...createLinkedArgs,
+      authorizeLinkedItem: async p => {
+        if (p.target?.publishedAt) throw new Error("Published child is unreadable");
+        if (p.proposed && !publishedConcurrently) {
+          publishedConcurrently = true;
+          await app.documents(linkedArticleUid).update({
+            documentId: missingLink.documentId, locale: "en", data: { title: "Concurrent target" },
+          });
+          await app.documents(linkedArticleUid).publish({ documentId: missingLink.documentId, locale: "en" });
+        }
+      },
+    }), /Published child is unreadable/);
+  } finally {
+    pageOptions.draftAndPublish = previousDP;
+    await app.documents(linkedArticleUid).delete({ documentId: missingLink.documentId, locale: "en" });
+  }
+  const authorizedItems = [];
+  const createdLinks = await svc("translate").translateDocument({
+    ...createLinkedArgs,
+    authorizeLinkedItem: async p => { authorizedItems.push(p); },
+  });
+  assert.equal(createdLinks.warnings.length, 0);
+  assert(authorizedItems.some(p => p.documentId === missingLink.documentId && p.proposed));
+  const linkedPage = await svc("changes").load(uid, relationPage.documentId, "en");
+  assert.deepEqual(linkedPage.modules[0].articles.map(a => a.documentId).sort(),
+    [missingLink.documentId, availableLink.documentId].sort());
+  assert.equal(linkedPage.modules[0].articles.find(a => a.documentId === availableLink.documentId).title,
+    "Also in English");
+  const createdLink = linkedPage.modules[0].articles.find(a => a.documentId === missingLink.documentId);
+  assert.equal(createdLink.title, "[en] Nur auf Deutsch");
+  assert.equal(createdLink.publishedAt, null);
+  // A failed parent save must not leave newly created linked translations behind.
+  const translateService = svc("translate");
+  const originalCommit = translateService.commitPreview;
+  translateService.commitPreview = function (args, opts) {
+    if (args.uid === uid) throw new Error("Parent save failed");
+    return originalCommit.call(this, args, opts);
+  };
+  try {
+    await assert.rejects(translateService.translateDocument({
+      ...createLinkedArgs, targetLocale: "fr", authorizeLinkedItem: async () => {},
+    }), /Parent save failed/);
+  } finally {
+    translateService.commitPreview = originalCommit;
+  }
+  for (const link of [missingLink, availableLink]) {
+    assert.equal(await app.documents(linkedArticleUid).findOne({
+      documentId: link.documentId, locale: "fr", status: "draft",
+    }), null);
+  }
+  let concurrentCreated = false;
+  await translateService.translateDocument({
+    ...createLinkedArgs, targetLocale: "fr",
+    authorizeLinkedItem: async p => {
+      if (p.proposed && p.documentId === missingLink.documentId && !concurrentCreated) {
+        concurrentCreated = true;
+        await app.documents(linkedArticleUid).update({
+          documentId: missingLink.documentId, locale: "fr",
+          data: { title: "An editor created this while translation was running" },
+        });
+      }
+    },
+  });
+  assert.equal((await svc("changes").load(linkedArticleUid, missingLink.documentId, "fr")).title,
+    "An editor created this while translation was running");
+  console.log("PASS opt-in linked creation checks permissions, preserves existing translations, and rolls back with the page");
+
   const doc = await app
     .documents(uid)
     .findFirst({

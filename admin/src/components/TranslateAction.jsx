@@ -130,6 +130,7 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
 
   // Preview-flow state
   const [previewMode, setPreviewMode] = useState(false);
+  const [createMissingRelations, setCreateMissingRelations] = useState(false);
   const [preview, setPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [committingPreview, setCommittingPreview] = useState(false);
@@ -433,6 +434,7 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
         documentId,
         sourceLocale,
         targetLocales: targets,
+        createMissingRelations,
       });
       setJobId(res.data.jobId);
       setJob(null);
@@ -913,7 +915,7 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
           {
             id: `${pluginId}.summary.warningsIntro`,
             defaultMessage:
-              "{count} reference(s) across the translated entries point at records that no longer exist. They were left empty — please review and re-link them manually.",
+              "{count} reference(s) are unavailable in the target language. They were left empty. You can translate again with “Create missing linked translations” enabled, or review and re-link them manually.",
           },
           { count: warningsCount }
         ),
@@ -1072,12 +1074,38 @@ const TranslateModal = ({ onClose, model, documentId, sourceLocale }) => {
 
             {targets.length > 0 && renderEstimateCard()}
 
+            <Flex direction="column" alignItems="stretch" gap={2}>
+              <Checkbox
+                name="create-missing-relations"
+                checked={createMissingRelations}
+                disabled={effectivePreview}
+                onCheckedChange={(v) => {
+                  setCreateMissingRelations(!!v);
+                  if (v) setPreviewMode(false);
+                }}
+              >
+                {formatMessage({
+                  id: `${pluginId}.dialog.createMissingRelations`,
+                  defaultMessage: "Create missing linked translations",
+                })}
+              </Checkbox>
+              <Typography variant="pi" textColor="neutral600">
+                {formatMessage({
+                  id: `${pluginId}.dialog.createMissingRelationsHint`,
+                  defaultMessage: "Create missing language versions of directly linked items. Existing translations are kept. Additional costs are not included in the estimate. Turn off preview to use this option, or use “Also translate linked items” in the changes review.",
+                })}
+              </Typography>
+            </Flex>
+
             {previewAvailable && (
               <Flex gap={2} alignItems="center">
                 <Checkbox
                   name="preview-mode"
                   checked={previewMode}
-                  onCheckedChange={(v) => setPreviewMode(!!v)}
+                  onCheckedChange={(v) => {
+                    setPreviewMode(!!v);
+                    if (v) setCreateMissingRelations(false);
+                  }}
                 >
                   {formatMessage({
                     id: `${pluginId}.dialog.previewToggle`,

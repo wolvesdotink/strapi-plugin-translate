@@ -1,3 +1,5 @@
+import { snapshot, fingerprint, problem, initialPayload } from "./content-tree";
+
 /**
  * @typedef {object} RefRecord
  * @property {string} target  Strapi UID of the target table (e.g. "admin::user")
@@ -376,7 +378,7 @@ const walkComponent = ({
 // We deliberately don't batch across tables because each FK lives on its
 // own table; cross-table batching would require dynamic SQL or N round-trips
 // either way. For a typical entry this is 2–4 queries.
-const verifyRelations = async ({ strapi, refs }) => {
+const verifyRelations = async ({ strapi, refs, uid, targetLocale }) => {
   if (refs.length === 0) return [];
 
   const byTarget = new Map();
@@ -391,8 +393,23 @@ const verifyRelations = async ({ strapi, refs }) => {
 
   const missingByTarget = new Map();
   for (const [target, { idField, ids }] of byTarget) {
+    const where = { [idField]: { $in: [...ids] } };
+    if (idField === "documentId") {
+      const targetModel = strapi.getModel(target);
+      // Document-service relations resolve in the destination language, not
+      // any language in which the linked document happens to exist.
+      if (targetModel?.pluginOptions?.i18n?.localized) {
+        where.locale = targetLocale;
+      }
+      // A draft of a draft/publish document links to other drafts. Without
+      // draft/publish on the source, Strapi accepts either target status.
+      if (strapi.getModel(uid)?.options?.draftAndPublish &&
+          targetModel?.options?.draftAndPublish) {
+        where.publishedAt = null;
+      }
+    }
     const found = await strapi.db.query(target).findMany({
-      where: { [idField]: { $in: [...ids] } },
+      where,
       select: [idField],
     });
     const foundIds = new Set(found.map((r) => r[idField]));
@@ -470,7 +487,7 @@ export default ({ strapi }) => {
     // Used by translateDocument (which then upserts), translateDocumentDry
     // (preview flow), and the back-translate sanity check.
     async _compute({
-      selectedPaths,
+      selectedPaths = undefined,
       sourceEntry,
       uid,
       documentId,
@@ -478,7 +495,9 @@ export default ({ strapi }) => {
       targetLocale,
       actingUserId,
       signal,
-      onProgress,
+      onProgress = undefined,
+      resolveMissingRelations = undefined,
+      authorizePayload = undefined,
     }) {
       if (!uid) throw new Error("uid is required");
       if (!documentId) throw new Error("documentId is required");
@@ -588,10 +607,15 @@ export default ({ strapi }) => {
           });
         }
       }
-      const missingRefs = await verifyRelations({
+      let missingRefs = await verifyRelations({
         strapi,
         refs: bag.relations,
+        uid,
+        targetLocale,
       });
+      if (resolveMissingRelations) {
+        missingRefs = await resolveMissingRelations(missingRefs);
+      }
       for (const ref of missingRefs) ref.cleanup();
       const warnings = missingRefs.map((r) => ({
         target: r.target,
@@ -604,6 +628,13 @@ export default ({ strapi }) => {
             .map((w) => `${w.target}#${w.id} @ ${w.label}`)
             .join("; ")}`
         );
+      }
+
+      if (authorizePayload) {
+        const proposed = structuredClone(data);
+        for (const item of [...bag.plain, ...bag.html]) set(proposed, item.path, item.text);
+        for (const item of bag.blocks) set(proposed, item.path, item.source);
+        await authorizePayload(initialPayload(strapi, uid, proposed));
       }
 
       // 3. Translate each format group (chunked)
@@ -825,8 +856,56 @@ export default ({ strapi }) => {
      *     warnings. Doubles cost on the sampled subset; off by default.
      */
     async translateDocument(args) {
-      const computed = await this._compute(args);
-      let warnings = computed.warnings.slice();
+      const staged = [];
+      const sourceLocale = args.sourceLocale || config().sourceLocale;
+      const state = strapi.plugin("translate").service("state");
+      const resolveMissingRelations = args.createMissingRelations === true
+        ? async (refs) => {
+          if (!args.authorizeLinkedItem || !state) {
+            throw problem("Creating linked translations requires permission checks.", 403);
+          }
+          const candidates = [...new Map(refs.filter(ref =>
+            ref.idField === "documentId" &&
+            strapi.getModel(ref.target)?.pluginOptions?.i18n?.localized &&
+            !(ref.target === args.uid && ref.id === args.documentId)
+          ).map(ref => [`${ref.target}:${ref.id}`, ref])).values()];
+          const limit = config().selectiveTranslation?.maxLinkedItems || 20;
+          if (candidates.length > limit) {
+            throw problem(`Creating linked translations is limited to ${limit} direct items.`, 400);
+          }
+          // Prepare and authorize every item before spending tokens on children.
+          for (const ref of candidates) {
+            args.signal?.throwIfAborted();
+            const source = await strapi.documents(ref.target).findOne({
+              documentId: ref.id, locale: sourceLocale, status: "draft",
+              populate: fields().buildPopulate(ref.target),
+            });
+            if (!source) continue;
+            const current = snapshot(strapi, ref.target, source);
+            const prepared = {
+              uid: ref.target, documentId: ref.id, sourceLocale,
+              targetLocale: args.targetLocale, source, target: null, current,
+            };
+            await args.authorizeLinkedItem(prepared);
+            staged.push({ prepared, computed: null });
+          }
+          for (const item of staged) {
+            item.computed = await this._compute({
+              uid: item.prepared.uid, documentId: item.prepared.documentId,
+              sourceLocale, targetLocale: args.targetLocale,
+              sourceEntry: item.prepared.source,
+              actingUserId: args.actingUserId, signal: args.signal,
+              authorizePayload: proposed => args.authorizeLinkedItem({ ...item.prepared, proposed }),
+            });
+            item.computed.proposed = initialPayload(strapi, item.prepared.uid, item.computed.proposed);
+            await args.authorizeLinkedItem({ ...item.prepared, proposed: item.computed.proposed });
+          }
+          return refs.filter(ref => !staged.some(item =>
+            item.prepared.uid === ref.target && item.prepared.documentId === ref.id));
+        }
+        : undefined;
+      const computed = await this._compute({ ...args, resolveMissingRelations });
+      let warnings = [...computed.warnings, ...staged.flatMap(item => item.computed.warnings)];
       if (args && args.sanityCheck) {
         try {
           const sanity = await this._runSanityCheck({
@@ -843,7 +922,6 @@ export default ({ strapi }) => {
           );
         }
       }
-      const state = strapi.plugin("translate").service("state");
       const commit = () => this.commitPreview(computed, {
         signal: args?.signal,
         onRepair: (repairs) => {
@@ -858,8 +936,48 @@ export default ({ strapi }) => {
           }
         },
       });
-      const entry = await (state ? state.runTranslation(commit) : commit());
+      const created = [];
+      const commitAll = staged.length ? () => state.transaction(async ({ trx }) => {
+        await state.lockDocuments(trx, [args, ...staged.map(item => item.prepared)]);
+        for (const item of staged) {
+          args.signal?.throwIfAborted();
+          const p = item.prepared;
+          const source = await strapi.documents(p.uid).findOne({
+            documentId: p.documentId, locale: sourceLocale, status: "draft",
+            populate: fields().buildPopulate(p.uid),
+          });
+          if (!source) throw problem("A linked source item no longer exists.");
+          // A concurrent editor may have created this language while the LLM
+          // was running. Keep that version instead of overwriting it.
+          const existing = await strapi.documents(p.uid).findOne({
+            documentId: p.documentId, locale: p.targetLocale, status: "draft",
+          });
+          if (existing) {
+            await args.authorizeLinkedItem({ ...p, source, target: existing });
+            // A parent without draft/publish attaches both versions of a
+            // localized relation. A concurrent publish needs its own check.
+            if (!strapi.getModel(args.uid)?.options?.draftAndPublish &&
+                strapi.getModel(p.uid)?.options?.draftAndPublish) {
+              const published = await strapi.documents(p.uid).findOne({
+                documentId: p.documentId, locale: p.targetLocale, status: "published",
+              });
+              if (published) await args.authorizeLinkedItem({ ...p, source, target: published });
+            }
+            continue;
+          }
+          if (fingerprint(snapshot(strapi, p.uid, source)) !== fingerprint(p.current)) {
+            throw problem("A linked source item changed during translation. Try again.");
+          }
+          await args.authorizeLinkedItem({ ...p, source, proposed: item.computed.proposed });
+          await this.commitPreview(item.computed, { allowRepair: false, signal: args.signal });
+          created.push(p);
+        }
+        args.signal?.throwIfAborted();
+        return commit();
+      }) : commit;
+      const entry = await (state ? state.runTranslation(commitAll) : commitAll());
       const changes = strapi.plugin("translate").service("changes");
+      if (changes) for (const p of created) await changes.recordFull(p);
       if (changes) await changes.recordFull({ ...args, sourceLocale: args.sourceLocale || config().sourceLocale });
       return { entry, warnings };
     },
